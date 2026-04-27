@@ -43,7 +43,8 @@
 bool PropertyUtils::is_property_value_different(const Object *p_object, const Variant &p_a, const Variant &p_b) {
 	if (p_a.get_type() == Variant::FLOAT && p_b.get_type() == Variant::FLOAT) {
 		// This must be done because, as some scenes save as text, there might be a tiny difference in floats due to numerical error.
-		return !Math::is_equal_approx((float)p_a, (float)p_b);
+		//return !Math::is_equal_approx((float)p_a, (float)p_b);
+		return true;
 	} else if (p_a.get_type() == Variant::NODE_PATH && p_b.get_type() == Variant::OBJECT) {
 		// With properties of type Node, left side is NodePath, while right side is Node.
 		const Node *base_node = Object::cast_to<Node>(p_object);

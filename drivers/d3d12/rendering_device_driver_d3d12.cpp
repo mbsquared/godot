@@ -5176,8 +5176,8 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 	}
 	(&pipeline_desc.RasterizerState)->ForcedSampleCount = 0;
 	(&pipeline_desc.RasterizerState)->ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
-	(&pipeline_desc.RasterizerState)->MultisampleEnable = TEXTURE_SAMPLES_COUNT[p_multisample_state.sample_count] != 1;
-	(&pipeline_desc.RasterizerState)->AntialiasedLineEnable = true;
+	(&pipeline_desc.RasterizerState)->MultisampleEnable = false;
+	(&pipeline_desc.RasterizerState)->AntialiasedLineEnable = false;
 
 	// In D3D12, there's no line width.
 	ERR_FAIL_COND_V(!Math::is_equal_approx(p_rasterization_state.line_width, 1.0f), PipelineID());
