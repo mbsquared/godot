@@ -104,6 +104,14 @@ public:
 		bool check_multiview_samplers = false;
 	};
 
+	struct LastCompileResult {
+		bool success = true;
+		String error_text;
+		int error_line = 0;
+		String error_file;
+	};
+	static LastCompileResult last_result;
+
 private:
 	ShaderLanguage parser;
 

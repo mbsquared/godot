@@ -51,10 +51,13 @@ public:
 		MODE_MAX
 	};
 
+	Dictionary get_last_compile_info();
+
 private:
 	mutable RID shader_rid;
 	mutable String preprocessed_code;
 	mutable Mutex shader_rid_mutex;
+	mutable String last_compilation_error;
 
 	Mode mode = MODE_SPATIAL;
 	HashSet<Ref<ShaderInclude>> include_dependencies;

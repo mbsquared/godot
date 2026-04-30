@@ -3067,7 +3067,7 @@ void SceneShaderData::set_code(const String &p_code) {
 	actions.uniforms = &uniforms;
 
 	Error err = MaterialStorage::get_singleton()->shaders.compiler_scene.compile(RS::SHADER_SPATIAL, code, &actions, path, gen_code);
-	ERR_FAIL_COND_MSG(err != OK, "Shader compilation failed.");
+	ERR_FAIL_COND_MSG(err != OK, "Shader compilation failed. :(");
 
 	if (version.is_null()) {
 		version = MaterialStorage::get_singleton()->shaders.scene_shader.version_create();

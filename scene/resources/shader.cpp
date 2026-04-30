@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "shader.h"
+#include <servers/rendering/shader_compiler.h>
 #include "shader.compat.inc"
 
 #include "core/io/file_access.h"
@@ -270,6 +271,7 @@ Array Shader::_get_shader_uniform_list(bool p_get_groups) {
 }
 
 void Shader::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_last_compile_info"), &Shader::get_last_compile_info);
 	ClassDB::bind_method(D_METHOD("get_mode"), &Shader::get_mode);
 
 	ClassDB::bind_method(D_METHOD("set_code", "code"), &Shader::set_code);
@@ -378,3 +380,19 @@ void ResourceFormatSaverShader::get_recognized_extensions(const Ref<Resource> &p
 bool ResourceFormatSaverShader::recognize(const Ref<Resource> &p_resource) const {
 	return p_resource->get_class_name() == "Shader"; //only shader, not inherited
 }
+
+Dictionary Shader::get_last_compile_info() {
+	Dictionary d;
+	// Note: You may need to access the renderer's compiler instance here
+	// Depending on the renderer (Forward+, Mobile, etc.)
+	// For example, in RD-based renderers:
+	ShaderCompiler::LastCompileResult result = ShaderCompiler::last_result;
+
+	d["success"] = result.success;
+	d["error_text"] = result.error_text;
+	d["error_line"] = result.error_line;
+	d["error_file"] = result.error_file;
+	return d;
+}
+
+

@@ -35,6 +35,8 @@
 
 #define SL ShaderLanguage
 
+ShaderCompiler::LastCompileResult ShaderCompiler::last_result;
+
 static String _mktab(int p_level) {
 	return String("\t").repeat(p_level);
 }
@@ -1593,9 +1595,25 @@ Error ShaderCompiler::compile(RS::ShaderMode p_mode, const String &p_code, Ident
 			line = parser.get_error_line();
 		}
 
+		// --- ADD THIS BLOCK ---
+		last_result.success = false;
+		last_result.error_text = parser.get_error_text();
+		last_result.error_line = line;
+		last_result.error_file = file;
+		// ----------------------
+
+		#ifdef TOOLS_ENABLED
 		_err_print_error(nullptr, file.utf8().get_data(), line, parser.get_error_text().utf8().get_data(), false, ERR_HANDLER_SHADER);
+
+		#endif // TOOLS_ENABLED
+
 		return err;
 	}
+
+	// --- ADD THIS TO THE TOP OF SUCCESS BLOCK ---
+	last_result.success = true;
+	last_result.error_text = "";
+	// --------------------------------------------
 
 	r_gen_code.defines.clear();
 	r_gen_code.code.clear();
