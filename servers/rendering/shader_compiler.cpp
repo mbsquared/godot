@@ -1563,26 +1563,30 @@ Error ShaderCompiler::compile(RS::ShaderMode p_mode, const String &p_code, Ident
 				continue;
 			}
 
-			if (E.key.is_empty()) {
-				if (p_path == "") {
-					print_line("--Main Shader--");
+			#ifdef TOOLS_ENABLED
+			if (Engine::get_singleton()->is_editor_hint()) {
+				if (E.key.is_empty()) {
+					if (p_path == "") {
+						print_line("--Main Shader--");
+					} else {
+						print_line("--" + p_path + "--");
+					}
 				} else {
-					print_line("--" + p_path + "--");
+					print_line("--" + E.key + "--");
 				}
-			} else {
-				print_line("--" + E.key + "--");
-			}
-			const Vector<String> &V = E.value;
-			for (int i = 0; i < V.size(); i++) {
-				if (i == err_line - 1) {
-					// Mark the error line to be visible without having to look at
-					// the trace at the end.
-					print_line(vformat("E%4d-> %s", i + 1, V[i]));
-				} else if ((i == err_line - 3) || (i == err_line - 2) || (i == err_line) || (i == err_line + 1)) {
-					// Print 4 lines around the error line.
-					print_line(vformat("%5d | %s", i + 1, V[i]));
+				const Vector<String> &V = E.value;
+				for (int i = 0; i < V.size(); i++) {
+					if (i == err_line - 1) {
+						// Mark the error line to be visible without having to look at
+						// the trace at the end.
+						print_line(vformat("E%4d-> %s", i + 1, V[i]));
+					} else if ((i == err_line - 3) || (i == err_line - 2) || (i == err_line) || (i == err_line + 1)) {
+						// Print 4 lines around the error line.
+						print_line(vformat("%5d | %s", i + 1, V[i]));
+					}
 				}
 			}
+			#endif // TOOLS_ENABLED
 		}
 
 		String file;
@@ -1603,7 +1607,8 @@ Error ShaderCompiler::compile(RS::ShaderMode p_mode, const String &p_code, Ident
 		// ----------------------
 
 		#ifdef TOOLS_ENABLED
-		_err_print_error(nullptr, file.utf8().get_data(), line, parser.get_error_text().utf8().get_data(), false, ERR_HANDLER_SHADER);
+		if (Engine::get_singleton()->is_editor_hint())
+			_err_print_error(nullptr, file.utf8().get_data(), line, parser.get_error_text().utf8().get_data(), false, ERR_HANDLER_SHADER);
 
 		#endif // TOOLS_ENABLED
 

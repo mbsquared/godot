@@ -173,7 +173,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		err = SceneShaderForwardClustered::singleton->compiler.compile(RS::SHADER_SPATIAL, code, &actions, path, gen_code);
 	}
 
-	if (err != OK) {
+	if (err != OK && Engine::get_singleton()->is_editor_hint()) {
 		if (version.is_valid()) {
 			SceneShaderForwardClustered::singleton->shader.version_free(version);
 			version = RID();
