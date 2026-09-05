@@ -184,6 +184,22 @@ void JoltSpace3D::step(float p_step) {
 	stepping = true;
 	last_step = p_step;
 
+	// CRUMB: solver step counts are LIVE-tunable. JoltProjectSettings re-reads on every
+	// settings_changed, but the space only applied mNumVelocitySteps/mNumPositionSteps at
+	// construction — re-apply here (compare-before-write) so the in-app spin boxes take effect
+	// on the very next step.
+	{
+		const JPH::PhysicsSettings &current = physics_system->GetPhysicsSettings();
+		const JPH::uint velocity_steps = (JPH::uint)JoltProjectSettings::simulation_velocity_steps;
+		const JPH::uint position_steps = (JPH::uint)JoltProjectSettings::simulation_position_steps;
+		if (current.mNumVelocitySteps != velocity_steps || current.mNumPositionSteps != position_steps) {
+			JPH::PhysicsSettings updated = current;
+			updated.mNumVelocitySteps = velocity_steps;
+			updated.mNumPositionSteps = position_steps;
+			physics_system->SetPhysicsSettings(updated);
+		}
+	}
+
 	_pre_step(p_step);
 
 	physics_system->SetBodyActivationListener(body_activation_listener);

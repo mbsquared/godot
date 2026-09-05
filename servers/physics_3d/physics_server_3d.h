@@ -697,6 +697,12 @@ public:
 	virtual void joint_make_hinge(RID p_joint, RID p_body_A, const Transform3D &p_hinge_A, RID p_body_B, const Transform3D &p_hinge_B) = 0;
 	virtual void joint_make_hinge_simple(RID p_joint, RID p_body_A, const Vector3 &p_pivot_A, const Vector3 &p_axis_A, RID p_body_B, const Vector3 &p_pivot_B, const Vector3 &p_axis_B) = 0;
 
+	// A gear coupling between two already-hinged rotating bodies: a hard velocity constraint locking their
+	// spin rates to `ratio`. Non-pure so only servers that support it (Jolt) need override; others get a
+	// null RID. `p_axis_a`/`p_axis_b` are each body's spin axis in its OWN local frame; ratio is signed
+	// (negate to flip mesh direction). Unlike the make_* calls it mints its own RID (no Joint3D node).
+	virtual RID gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, double p_ratio) { return RID(); }
+
 	virtual void hinge_joint_set_param(RID p_joint, HingeJointParam p_param, real_t p_value) = 0;
 	virtual real_t hinge_joint_get_param(RID p_joint, HingeJointParam p_param) const = 0;
 
@@ -817,6 +823,25 @@ public:
 	virtual void flush_queries() = 0;
 	virtual void end_sync() = 0;
 	virtual void finish() = 0;
+
+	// CRUMB free-running physics (physics/3d/free_running): the threaded wrapper runs the tick loop
+	// on its own clock. Declared here, non-pure, so the script binding dispatches through the
+	// wrapper singleton (the same shape as gear_joint_create); servers without the mode inherit the
+	// no-ops. The callback runs ON the physics thread with the step's delta, before the step; while
+	// paused the loop stops stepping but keeps serving the command queue. Tick stats are for HUDs.
+	virtual bool is_free_running() const { return false; }
+	virtual void set_free_running_callback(const Callable &p_callback) {}
+	virtual void set_free_running_paused(bool p_paused) {}
+	virtual bool is_free_running_paused() const { return false; }
+	virtual void set_free_running_unthrottled(bool p_unthrottled) {}
+	virtual bool is_free_running_unthrottled() const { return false; }
+	// Idle: the loop steps at a token rate on OS sleeps instead of holding the tick rate on a
+	// core, for an application whose world is standing still (an editor with nothing playing).
+	virtual void set_free_running_idle(bool p_idle) {}
+	virtual bool is_free_running_idle() const { return false; }
+	virtual uint64_t get_free_running_tick_count() const { return 0; }
+	virtual double get_free_running_last_tick_usec() const { return 0.0; }
+	virtual double get_free_running_last_step_usec() const { return 0.0; }
 
 	virtual bool is_flushing_queries() const = 0;
 

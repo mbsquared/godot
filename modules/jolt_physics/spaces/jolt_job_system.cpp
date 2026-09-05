@@ -140,6 +140,13 @@ JPH::JobHandle JoltJobSystem::CreateJob(const char *p_name, JPH::ColorArg p_colo
 }
 
 void JoltJobSystem::QueueJob(JPH::JobSystem::Job *p_job) {
+	if (single_threaded) {
+		// Inline, the way Jolt's own single-threaded job system does it: a job whose dependencies
+		// are met runs here and now, on this thread, recursively queueing what it releases. The
+		// pool never sees it, so its slot is free the moment the barrier drops the handle.
+		p_job->Execute();
+		return;
+	}
 	static_cast<Job *>(p_job)->queue();
 }
 
@@ -154,14 +161,23 @@ void JoltJobSystem::FreeJob(JPH::JobSystem::Job *p_job) {
 }
 
 void JoltJobSystem::_reclaim_jobs() {
+	// Exclusive: the completed list is a lock-free stack, and a second popper (the exhaustion wait
+	// in CreateJob, on whichever thread ran out) could ABA against this one. A reclaim already in
+	// progress is as good as ours.
+	bool expected = false;
+	if (!reclaim_busy.compare_exchange_strong(expected, true)) {
+		return;
+	}
 	while (Job *job = Job::pop_completed()) {
 		jobs.DestructObject(job);
 	}
+	reclaim_busy.store(false);
 }
 
 JoltJobSystem::JoltJobSystem() :
 		JPH::JobSystemWithBarrier(JPH::cMaxPhysicsBarriers),
-		thread_count(MAX(1, WorkerThreadPool::get_singleton()->get_thread_count())) {
+		thread_count(JoltProjectSettings::single_threaded ? 1 : MAX(1, WorkerThreadPool::get_singleton()->get_thread_count())),
+		single_threaded(JoltProjectSettings::single_threaded) {
 	jobs.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsJobs);
 }
 

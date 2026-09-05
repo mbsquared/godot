@@ -1771,6 +1771,12 @@ ProjectSettings::ProjectSettings() {
 #endif // PHYSICS_2D_DISABLED
 #ifndef PHYSICS_3D_DISABLED
 	GLOBAL_DEF("physics/3d/run_on_separate_thread", false);
+	// CRUMB: the physics server thread runs the tick loop on its own clock (requires
+	// run_on_separate_thread). The main loop steps nothing; a pre-step callback runs on the
+	// physics thread; the main thread reads state through the command queue or while parked.
+	GLOBAL_DEF("physics/3d/free_running", false);
+	GLOBAL_DEF("physics/3d/free_running_unthrottled", false);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "physics/3d/free_running_max_catchup_steps", PROPERTY_HINT_RANGE, "1,64,1"), 8);
 #endif // PHYSICS_3D_DISABLED
 
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::STRING, "display/window/stretch/mode", PROPERTY_HINT_ENUM, "disabled,canvas_items,viewport"), "disabled");

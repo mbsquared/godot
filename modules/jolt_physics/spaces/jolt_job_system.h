@@ -81,6 +81,8 @@ class JoltJobSystem final : public JPH::JobSystemWithBarrier {
 	JPH::FixedSizeFreeList<Job> jobs;
 
 	int thread_count = 0;
+	bool single_threaded = false;              // jobs execute inline on the queueing thread, never on the pool
+	std::atomic<bool> reclaim_busy = false;    // one reclaimer at a time: two poppers on the completed stack could ABA it
 
 	virtual int GetMaxConcurrency() const override;
 

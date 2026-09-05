@@ -948,6 +948,21 @@ void PhysicsServer3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("joint_make_hinge", "joint", "body_A", "hinge_A", "body_B", "hinge_B"), &PhysicsServer3D::joint_make_hinge);
 
+	ClassDB::bind_method(D_METHOD("gear_joint_create", "body_a", "axis_a", "body_b", "axis_b", "ratio"), &PhysicsServer3D::gear_joint_create);
+
+	// CRUMB free-running physics thread.
+	ClassDB::bind_method(D_METHOD("is_free_running"), &PhysicsServer3D::is_free_running);
+	ClassDB::bind_method(D_METHOD("set_free_running_callback", "callback"), &PhysicsServer3D::set_free_running_callback);
+	ClassDB::bind_method(D_METHOD("set_free_running_paused", "paused"), &PhysicsServer3D::set_free_running_paused);
+	ClassDB::bind_method(D_METHOD("is_free_running_paused"), &PhysicsServer3D::is_free_running_paused);
+	ClassDB::bind_method(D_METHOD("set_free_running_unthrottled", "unthrottled"), &PhysicsServer3D::set_free_running_unthrottled);
+	ClassDB::bind_method(D_METHOD("is_free_running_unthrottled"), &PhysicsServer3D::is_free_running_unthrottled);
+	ClassDB::bind_method(D_METHOD("set_free_running_idle", "idle"), &PhysicsServer3D::set_free_running_idle);
+	ClassDB::bind_method(D_METHOD("is_free_running_idle"), &PhysicsServer3D::is_free_running_idle);
+	ClassDB::bind_method(D_METHOD("get_free_running_tick_count"), &PhysicsServer3D::get_free_running_tick_count);
+	ClassDB::bind_method(D_METHOD("get_free_running_last_tick_usec"), &PhysicsServer3D::get_free_running_last_tick_usec);
+	ClassDB::bind_method(D_METHOD("get_free_running_last_step_usec"), &PhysicsServer3D::get_free_running_last_step_usec);
+
 	ClassDB::bind_method(D_METHOD("hinge_joint_set_param", "joint", "param", "value"), &PhysicsServer3D::hinge_joint_set_param);
 	ClassDB::bind_method(D_METHOD("hinge_joint_get_param", "joint", "param"), &PhysicsServer3D::hinge_joint_get_param);
 

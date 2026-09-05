@@ -31,6 +31,7 @@
 #include "jolt_physics_server_3d.h"
 
 #include "joints/jolt_cone_twist_joint_3d.h"
+#include "joints/jolt_gear_joint_3d.h"
 #include "joints/jolt_generic_6dof_joint_3d.h"
 #include "joints/jolt_hinge_joint_3d.h"
 #include "joints/jolt_joint_3d.h"
@@ -1254,6 +1255,30 @@ RID JoltPhysicsServer3D::joint_create() {
 	JoltJoint3D *joint = memnew(JoltJoint3D);
 	RID rid = joint_owner.make_rid(joint);
 	joint->set_rid(rid);
+	return rid;
+}
+
+RID JoltPhysicsServer3D::gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, double p_ratio) {
+	JoltBody3D *body_a = body_owner.get_or_null(p_body_a);
+	ERR_FAIL_NULL_V(body_a, RID());
+
+	JoltBody3D *body_b = body_owner.get_or_null(p_body_b);
+	ERR_FAIL_NULL_V(body_b, RID());
+	ERR_FAIL_COND_V(body_a == body_b, RID());
+
+	// Unlike the stock joint_make_* calls, a gear has no Joint3D scene node driving it — CRUMB creates it
+	// directly — so we mint the RID here. An empty base joint carries the RID + solver defaults that the
+	// typed constructor copies from, then we swap the real gear joint into the same RID slot.
+	JoltJoint3D *base_joint = memnew(JoltJoint3D);
+	RID rid = joint_owner.make_rid(base_joint);
+	base_joint->set_rid(rid);
+
+	JoltJoint3D *gear_joint = memnew(JoltGearJoint3D(*base_joint, body_a, body_b, p_axis_a, p_axis_b, (float)p_ratio));
+
+	memdelete(base_joint);
+	base_joint = nullptr;
+
+	joint_owner.replace(rid, gear_joint);
 	return rid;
 }
 

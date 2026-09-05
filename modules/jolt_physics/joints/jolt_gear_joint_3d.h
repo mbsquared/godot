@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  jolt_project_settings.h                                               */
+/*  jolt_gear_joint_3d.h                                                  */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,55 +30,28 @@
 
 #pragma once
 
-#include <cstdint>
+#include "../jolt_physics_server_3d.h"
+#include "jolt_joint_3d.h"
 
-enum JoltJointWorldNode : int {
-	JOLT_JOINT_WORLD_NODE_A,
-	JOLT_JOINT_WORLD_NODE_B,
-};
+#include "Jolt/Jolt.h"
 
-class JoltProjectSettings {
+// A GEAR coupling between two rotating bodies: a hard velocity constraint
+// omega_a . axis_a = -ratio * omega_b . axis_b, solved by Jolt every step, so a braked
+// output rigidly stalls the input (no slip, no penalty wind-up, no release kick — the
+// failure modes of the hand-rolled PD coupling this replaces). Axes are each body's spin
+// axis in its OWN local frame; ratio is teeth_target / teeth_owner (negate to flip mesh
+// direction: belt / internal ring gear). Created via JoltPhysicsServer3D::gear_joint_create.
+class JoltGearJoint3D final : public JoltJoint3D {
+	Vector3 hinge_axis_a;
+	Vector3 hinge_axis_b;
+	float ratio = 1.0f;
+
 public:
-	inline static int simulation_velocity_steps;
-	inline static int simulation_position_steps;
-	inline static bool use_enhanced_internal_edge_removal_for_bodies;
-	inline static bool single_threaded;
-	inline static bool generate_all_kinematic_contacts;
-	inline static float penetration_slop;
-	inline static float speculative_contact_distance;
-	inline static float baumgarte_stabilization_factor;
-	inline static float soft_body_point_radius;
-	inline static float bounce_velocity_threshold;
-	inline static bool sleep_allowed;
-	inline static float sleep_velocity_threshold;
-	inline static float sleep_time_threshold;
-	inline static float ccd_movement_threshold;
-	inline static float ccd_max_penetration;
-	inline static bool body_pair_contact_cache_enabled;
-	inline static float body_pair_cache_distance_sq;
-	inline static float body_pair_cache_angle_cos_div2;
+	JoltGearJoint3D(const JoltJoint3D &p_old_joint, JoltBody3D *p_body_a, JoltBody3D *p_body_b, const Vector3 &p_axis_a, const Vector3 &p_axis_b, float p_ratio);
 
-	inline static bool use_enhanced_internal_edge_removal_for_queries;
-	inline static bool enable_ray_cast_face_index;
+	// No dedicated PhysicsServer3D::JointType exists for gears; this joint is created + freed through the
+	// server's RID owner directly (never a Joint3D node), so the type is informational only.
+	virtual PhysicsServer3D::JointType get_type() const override { return PhysicsServer3D::JOINT_TYPE_MAX; }
 
-	inline static bool use_enhanced_internal_edge_removal_for_motion_queries;
-	inline static int motion_query_recovery_iterations;
-	inline static float motion_query_recovery_amount;
-
-	inline static float collision_margin_fraction;
-	inline static float active_edge_threshold_cos;
-
-	inline static JoltJointWorldNode joint_world_node;
-
-	inline static int temp_memory_mib;
-	inline static int64_t temp_memory_b;
-	inline static float world_boundary_shape_size;
-	inline static float max_linear_velocity;
-	inline static float max_angular_velocity;
-	inline static int max_bodies;
-	inline static int max_body_pairs;
-	inline static int max_contact_constraints;
-
-	static void register_settings();
-	static void read_settings();
+	virtual void rebuild() override;
 };

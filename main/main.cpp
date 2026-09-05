@@ -4830,6 +4830,13 @@ bool Main::iteration() {
 		process_step -= (advance.physics_steps - max_physics_steps) * physics_step;
 		advance.physics_steps = max_physics_steps;
 	}
+#ifndef PHYSICS_3D_DISABLED
+	// CRUMB free-running physics: the server thread steps on its own clock, so the node-side physics
+	// callbacks run once per frame here (the accumulator already consumed the steps it returned).
+	if (PhysicsServer3D::get_singleton()->is_free_running() && advance.physics_steps > 1) {
+		advance.physics_steps = 1;
+	}
+#endif // PHYSICS_3D_DISABLED
 
 	bool exit = false;
 

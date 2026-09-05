@@ -73,6 +73,37 @@ class PhysicsServer3DWrapMT : public PhysicsServer3D {
 	void _thread_loop();
 	void _thread_sync();
 
+	// ---- CRUMB free-running mode (physics/3d/free_running) ----------------------------------
+	// A dedicated thread runs the tick loop on its own clock: flush the command queue, and when
+	// the next tick is due (or at once, unthrottled) call the pre-step callback, step, repeat.
+	// The main loop's step/sync/end_sync become no-ops; its flush_queries runs once per frame
+	// under a short park, because the query callbacks read live bodies. The pause depth is only
+	// ever modified on the physics thread (through the queue), so a park request returning means
+	// the loop will not step again until the matching resume.
+	bool free_running = false;
+	bool free_unthrottled = false;
+	int free_max_catchup = 8;
+	Thread free_thread;
+	SafeFlag free_exit;
+	int free_pause_depth = 0;              // physics thread only
+	std::atomic<bool> free_parked{ false };
+	std::atomic<bool> free_active{ true }; // mirrors set_active
+	std::atomic<uint64_t> free_tick_count{ 0 };
+	std::atomic<uint64_t> free_last_tick_usec{ 0 };
+	std::atomic<uint64_t> free_last_step_usec{ 0 };
+	std::atomic<uint64_t> free_park_acks{ 0 }; // bumped by the loop each time it sits parked at the top of an iteration
+	uint64_t free_sim_debt_usec = 0;           // physics thread only: unthrottled wall time not yet simulated
+	std::atomic<bool> free_idle{ false };      // a token rate on OS sleeps while the application's world stands still
+	static constexpr int FREE_IDLE_TPS = 20;
+	bool free_synced = false;                  // main thread only: sync() parked the loop and end_sync() owes the release
+	Mutex free_callback_mutex;
+	Callable free_callback;
+
+	static void _free_thread_entry(void *p_self);
+	void _free_thread_loop();
+	void _free_pause_delta(int p_delta);   // executed on the physics thread
+	void _free_set_callback(const Callable &p_callback);
+
 public:
 #define ServerName PhysicsServer3D
 #define ServerNameWrapMT PhysicsServer3DWrapMT
@@ -344,6 +375,9 @@ public:
 
 	FUNCRID(joint)
 
+	// Synchronous (push_and_ret): the caller needs the minted RID immediately, same as the FUNCRID creators.
+	FUNC5R(RID, gear_joint_create, RID, const Vector3 &, RID, const Vector3 &, double)
+
 	FUNC1(joint_clear, RID)
 
 	FUNC5(joint_make_pin, RID, RID, const Vector3 &, RID, const Vector3 &)
@@ -395,7 +429,16 @@ public:
 	/* MISC */
 
 	FUNC1(free_rid, RID);
-	FUNC1(set_active, bool);
+	// set_active is mirrored for the free-running loop (a paused SceneTree deactivates the server:
+	// the loop must then neither call back nor step), and forwarded exactly as FUNC1 would.
+	virtual void set_active(bool p_active) override {
+		free_active.store(p_active);
+		if (Thread::get_caller_id() != server_thread) {
+			command_queue.push(physics_server_3d, &PhysicsServer3D::set_active, p_active);
+		} else {
+			physics_server_3d->set_active(p_active);
+		}
+	}
 
 	virtual void init() override;
 	virtual void step(real_t p_step) override;
@@ -403,6 +446,18 @@ public:
 	virtual void end_sync() override;
 	virtual void flush_queries() override;
 	virtual void finish() override;
+
+	virtual bool is_free_running() const override { return free_running; }
+	virtual void set_free_running_callback(const Callable &p_callback) override;
+	virtual void set_free_running_paused(bool p_paused) override;
+	virtual bool is_free_running_paused() const override { return free_running && free_parked.load(); }
+	virtual void set_free_running_unthrottled(bool p_unthrottled) override { free_unthrottled = p_unthrottled; }
+	virtual bool is_free_running_unthrottled() const override { return free_running && free_unthrottled; }
+	virtual void set_free_running_idle(bool p_idle) override { free_idle.store(p_idle); }
+	virtual bool is_free_running_idle() const override { return free_running && free_idle.load(); }
+	virtual uint64_t get_free_running_tick_count() const override { return free_tick_count.load(); }
+	virtual double get_free_running_last_tick_usec() const override { return (double)free_last_tick_usec.load(); }
+	virtual double get_free_running_last_step_usec() const override { return (double)free_last_step_usec.load(); }
 
 	virtual bool is_flushing_queries() const override {
 		return physics_server_3d->is_flushing_queries();

@@ -405,6 +405,12 @@ public:
 
 	virtual PhysicsServer3D::JointType joint_get_type(RID p_joint) const override;
 
+	// Jolt-specific: a native GearConstraint between two rotating bodies. Axes are each body's spin axis in
+	// its OWN local frame; ratio = teeth_target / teeth_owner (negate to flip the mesh direction). Returns a
+	// joint RID freed like any other via free(). Declared virtual on PhysicsServer3D + bound there, so it
+	// resolves through the WrapMT singleton and dispatches back here.
+	virtual RID gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, double p_ratio) override;
+
 	virtual void joint_set_solver_priority(RID p_joint, int p_priority) override;
 	virtual int joint_get_solver_priority(RID p_joint) const override;
 
