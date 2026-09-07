@@ -839,6 +839,9 @@ public:
 	// core, for an application whose world is standing still (an editor with nothing playing).
 	virtual void set_free_running_idle(bool p_idle) {}
 	virtual bool is_free_running_idle() const { return false; }
+	// Diagnostics: wall time the loop has spent parked by the main thread, and how many parks.
+	virtual uint64_t get_free_running_parked_usec() const { return 0; }
+	virtual uint64_t get_free_running_park_count() const { return 0; }
 	virtual uint64_t get_free_running_tick_count() const { return 0; }
 	virtual double get_free_running_last_tick_usec() const { return 0.0; }
 	virtual double get_free_running_last_step_usec() const { return 0.0; }

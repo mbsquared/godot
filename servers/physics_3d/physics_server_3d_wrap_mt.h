@@ -92,6 +92,8 @@ class PhysicsServer3DWrapMT : public PhysicsServer3D {
 	std::atomic<uint64_t> free_last_tick_usec{ 0 };
 	std::atomic<uint64_t> free_last_step_usec{ 0 };
 	std::atomic<uint64_t> free_park_acks{ 0 }; // bumped by the loop each time it sits parked at the top of an iteration
+	std::atomic<uint64_t> free_parked_usec{ 0 }; // total wall time the loop has spent parked (the main thread's cost to it)
+	std::atomic<uint64_t> free_park_count{ 0 };
 	uint64_t free_sim_debt_usec = 0;           // physics thread only: unthrottled wall time not yet simulated
 	std::atomic<bool> free_idle{ false };      // a token rate on OS sleeps while the application's world stands still
 	static constexpr int FREE_IDLE_TPS = 20;
@@ -458,6 +460,8 @@ public:
 	virtual uint64_t get_free_running_tick_count() const override { return free_tick_count.load(); }
 	virtual double get_free_running_last_tick_usec() const override { return (double)free_last_tick_usec.load(); }
 	virtual double get_free_running_last_step_usec() const override { return (double)free_last_step_usec.load(); }
+	virtual uint64_t get_free_running_parked_usec() const override { return free_parked_usec.load(); }
+	virtual uint64_t get_free_running_park_count() const override { return free_park_count.load(); }
 
 	virtual bool is_flushing_queries() const override {
 		return physics_server_3d->is_flushing_queries();

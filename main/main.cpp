@@ -2170,7 +2170,7 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 
 	OS::get_singleton()->set_cmdline(execpath, main_args, user_args);
 
-	Engine::get_singleton()->set_physics_ticks_per_second(GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "physics/common/physics_ticks_per_second", PROPERTY_HINT_RANGE, "1,1000,1"), 60));
+	Engine::get_singleton()->set_physics_ticks_per_second(GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "physics/common/physics_ticks_per_second", PROPERTY_HINT_RANGE, "1,5000,1"), 60));
 	Engine::get_singleton()->set_max_physics_steps_per_frame(GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "physics/common/max_physics_steps_per_frame", PROPERTY_HINT_RANGE, "1,100,1"), 8));
 	Engine::get_singleton()->set_physics_jitter_fix(GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "physics/common/physics_jitter_fix", PROPERTY_HINT_RANGE, "0,2,0.001,or_greater"), 0.5));
 	Engine::get_singleton()->set_max_fps(GLOBAL_DEF(PropertyInfo(Variant::INT, "application/run/max_fps", PROPERTY_HINT_RANGE, "0,1000,1"), 0));
@@ -4895,6 +4895,17 @@ bool Main::iteration() {
 		uint64_t navigation_begin = OS::get_singleton()->get_ticks_usec();
 
 #ifndef NAVIGATION_2D_DISABLED
+		// Free-running physics (CRUMB fork): the park that sync() opened covers the query flush and
+		// the physics callbacks, and nothing below needs the world held still. The navigation
+		// servers, the deferred-call flush and the timers run with the loop stepping again; code
+		// that queries the space from any of them parks for itself (the scene-side query window
+		// is already closed by then). Left inside the park, the deferred flush alone stalled the
+		// physics thread for milliseconds every frame. end_sync() below stays for the classic
+		// path and is a no-op here once released.
+		if (PhysicsServer3D::get_singleton()->is_free_running()) {
+			PhysicsServer3D::get_singleton()->end_sync();
+		}
+
 		GodotProfileZoneGrouped(_profile_zone, "NavigationServer2D::physics_process");
 		NavigationServer2D::get_singleton()->physics_process(physics_step * time_scale);
 #endif // NAVIGATION_2D_DISABLED

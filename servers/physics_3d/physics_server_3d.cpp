@@ -959,6 +959,8 @@ void PhysicsServer3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_free_running_unthrottled"), &PhysicsServer3D::is_free_running_unthrottled);
 	ClassDB::bind_method(D_METHOD("set_free_running_idle", "idle"), &PhysicsServer3D::set_free_running_idle);
 	ClassDB::bind_method(D_METHOD("is_free_running_idle"), &PhysicsServer3D::is_free_running_idle);
+	ClassDB::bind_method(D_METHOD("get_free_running_parked_usec"), &PhysicsServer3D::get_free_running_parked_usec);
+	ClassDB::bind_method(D_METHOD("get_free_running_park_count"), &PhysicsServer3D::get_free_running_park_count);
 	ClassDB::bind_method(D_METHOD("get_free_running_tick_count"), &PhysicsServer3D::get_free_running_tick_count);
 	ClassDB::bind_method(D_METHOD("get_free_running_last_tick_usec"), &PhysicsServer3D::get_free_running_last_tick_usec);
 	ClassDB::bind_method(D_METHOD("get_free_running_last_step_usec"), &PhysicsServer3D::get_free_running_last_step_usec);

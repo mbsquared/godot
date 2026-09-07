@@ -192,10 +192,29 @@ void JoltSpace3D::step(float p_step) {
 		const JPH::PhysicsSettings &current = physics_system->GetPhysicsSettings();
 		const JPH::uint velocity_steps = (JPH::uint)JoltProjectSettings::simulation_velocity_steps;
 		const JPH::uint position_steps = (JPH::uint)JoltProjectSettings::simulation_position_steps;
-		if (current.mNumVelocitySteps != velocity_steps || current.mNumPositionSteps != position_steps) {
+
+		// CRUMB: a Baumgarte factor that means the same thing at every step size. Jolt applies
+		// mBaumgarte as the fraction of the remaining position error (constraints AND contacts)
+		// removed per step, so at 2 kHz a factor tuned at 500 Hz corrects four times faster per
+		// second: a closed loop with a slider, tuned to be quiet at one rate, fights its own
+		// constraints at another, and a free-running loop's step varies within a run. With a
+		// reference rate set, the configured factor is the one tuned at THAT rate and the per-step
+		// factor is derived so the correction per unit of time is what stays constant:
+		// after time T the error is scaled by (1 - b)^(T / dt), which is rate-independent when
+		// b(dt) = 1 - (1 - b_ref)^(dt / dt_ref). At the reference rate it is exactly b_ref.
+		float baumgarte = JoltProjectSettings::baumgarte_stabilization_factor;
+		if (JoltProjectSettings::baumgarte_reference_rate > 0.0f && p_step > 0.0f) {
+			const float dt_ref = 1.0f / JoltProjectSettings::baumgarte_reference_rate;
+			baumgarte = 1.0f - Math::pow(1.0f - CLAMP(baumgarte, 0.0f, 0.999f), p_step / dt_ref);
+			baumgarte = CLAMP(baumgarte, 0.0f, 1.0f);
+		}
+
+		if (current.mNumVelocitySteps != velocity_steps || current.mNumPositionSteps != position_steps ||
+				!Math::is_equal_approx(current.mBaumgarte, baumgarte)) {
 			JPH::PhysicsSettings updated = current;
 			updated.mNumVelocitySteps = velocity_steps;
 			updated.mNumPositionSteps = position_steps;
+			updated.mBaumgarte = baumgarte;
 			physics_system->SetPhysicsSettings(updated);
 		}
 	}

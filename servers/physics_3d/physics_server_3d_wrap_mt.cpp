@@ -128,6 +128,7 @@ void PhysicsServer3DWrapMT::_free_thread_loop() {
 	uint64_t next_tick_usec = os->get_ticks_usec();
 	uint64_t last_step_start_usec = next_tick_usec;
 	bool parked_sync = false;   // Jolt's doing_sync is held while parked so main-thread state reads pass its guard
+	uint64_t park_start_usec = 0;
 
 	while (!free_exit.is_set()) {
 		// The main thread's commands (bodies, areas, joints, the park itself) execute here.
@@ -137,6 +138,8 @@ void PhysicsServer3DWrapMT::_free_thread_loop() {
 			if (!parked_sync) {
 				physics_server_3d->sync();
 				parked_sync = true;
+				park_start_usec = os->get_ticks_usec();
+				free_park_count.fetch_add(1);
 			}
 			free_parked.store(true);
 			free_park_acks.fetch_add(1);
@@ -156,6 +159,7 @@ void PhysicsServer3DWrapMT::_free_thread_loop() {
 		if (parked_sync) {
 			physics_server_3d->end_sync();
 			parked_sync = false;
+			free_parked_usec.fetch_add(os->get_ticks_usec() - park_start_usec);
 		}
 		free_parked.store(false);
 
@@ -170,20 +174,51 @@ void PhysicsServer3DWrapMT::_free_thread_loop() {
 		double delta;
 
 		if (free_unthrottled && !idle) {
-			// Back to back, each step advancing the wall time not yet simulated: never more than
-			// one period (the configured rate is the floor of the resolution, and a slow step
-			// cannot feed itself a growing delta), never less than a twentieth of one. Time the
-			// thread could not step, a park or a stall, is owed and paid back in period-sized steps
-			// up to the catch-up cap, so simulated time tracks the wall clock, which the coupling
-			// to the electrical thread needs; beyond the cap the time is dropped.
+			// Back to back, each step advancing exactly the wall time not yet simulated, and never
+			// more than one period: the configured rate is the FLOOR of the resolution, so a slow
+			// step cannot feed itself a growing delta, and a fast core runs finer than the rate on
+			// its own. Time the thread could not step, a park or a stall, is owed and paid back in
+			// period-sized steps up to the catch-up cap; past the cap it is dropped rather than
+			// burst through.
+			//
+			// THE DELTA IS NEVER PADDED UP TO A MINIMUM. A floor larger than the wall time actually
+			// elapsed advances simulated time faster than the clock, and it does so for as long as
+			// the loop is fast enough to keep hitting it - a permanent speed-up, not a transient.
+			// Measured 2026-09-06 on a four-body scene: 16.5 kHz against a 500 Hz rate, 60 us of
+			// wall time per iteration padded to a 100 us step, sim time running at 1.72x the clock.
+			// The electrical thread keeps its own wall-clock pace, so the two sides of an
+			// electro-mechanical model drift apart and a motor's protection trips on a machine that
+			// is simply running the mechanism too fast. When too little time is owed to be worth a
+			// step, the loop WAITS for the rest of it instead, which also caps the tick rate at
+			// twenty times the configured one and stops a trivial scene burning a core for
+			// resolution nobody asked for.
 			free_sim_debt_usec += now - last_step_start_usec;
-			const uint64_t max_debt_usec = period_usec * (uint64_t)free_max_catchup;
+			// The catch-up cap is counted in STEPS, so its absolute window shrinks as the rate
+			// rises: eight steps is 16 ms at 500 Hz but 1.6 ms at 5 kHz, which the main loop's
+			// own per-frame park can exceed on its own. Floor it at a frame or so of wall time,
+			// or a high rate silently runs in slow motion (sim/wall below 1.00) for no reason
+			// the user can see.
+			const uint64_t max_debt_usec = MAX(period_usec * (uint64_t)free_max_catchup, (uint64_t)20000);
 			if (free_sim_debt_usec > max_debt_usec) {
 				free_sim_debt_usec = max_debt_usec;
 			}
+			// A step so small that it is all overhead buys nothing, so the loop waits until at
+			// least this much wall time is owed. ABSOLUTE, deliberately not a fraction of the
+			// configured rate: the rate is only the resolution FLOOR in this mode, and tying the
+			// wait to it would silently slow a scene down when the user LOWERED the rate (at
+			// 500 Hz a twentieth of a period is 100 us, which would have trimmed a scene running
+			// happily at 13 kHz down to 10). In practice the step cost is the real ceiling
+			// anyway: a 47 us step cannot exceed about 21 kHz however small this is. Kept below a
+			// quarter period so a high configured rate is always reachable.
+			const uint64_t min_step_usec = MAX((uint64_t)1, MIN((uint64_t)20, period_usec / 4));
+			if (free_sim_debt_usec < min_step_usec) {
+				last_step_start_usec = now;   // this wait is owed time, not skipped time
+				_free_wait_usec(min_step_usec - free_sim_debt_usec);
+				continue;
+			}
 			const uint64_t step_usec = MIN(free_sim_debt_usec, period_usec);
 			free_sim_debt_usec -= step_usec;
-			delta = MAX((double)step_usec / 1000000.0, period * 0.05);
+			delta = (double)step_usec / 1000000.0;
 		} else {
 			if (now < next_tick_usec) {
 				// Wait in short slices so a command from the main thread never waits long; idle,
@@ -202,7 +237,11 @@ void PhysicsServer3DWrapMT::_free_thread_loop() {
 			// of a second in one step and bounce.
 			delta = idle ? MIN(period, 1.0 / MAX(1, engine->get_physics_ticks_per_second())) : period;
 			next_tick_usec += period_usec;
-			if (now > next_tick_usec && (now - next_tick_usec) > period_usec * (uint64_t)free_max_catchup) {
+			// The same floor the unthrottled debt has: eight periods is 16 ms at 500 Hz but 4 ms
+			// at 2 kHz, and a per-frame park longer than that DROPPED time every frame, so a high
+			// fixed rate ran slow in bursts (the motor drew above its trip current because it was
+			// getting less impulse per real second than it should; "pause, jitter, go again").
+			if (now > next_tick_usec && (now - next_tick_usec) > MAX(period_usec * (uint64_t)free_max_catchup, (uint64_t)20000)) {
 				next_tick_usec = now;   // too far behind: drop the time rather than burst through it
 			}
 		}

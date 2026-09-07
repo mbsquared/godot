@@ -47,6 +47,7 @@ public:
 	inline static float penetration_slop;
 	inline static float speculative_contact_distance;
 	inline static float baumgarte_stabilization_factor;
+	inline static float baumgarte_reference_rate;   // Hz the factor above was tuned at; 0 = stock per-step meaning
 	inline static float soft_body_point_radius;
 	inline static float bounce_velocity_threshold;
 	inline static bool sleep_allowed;
