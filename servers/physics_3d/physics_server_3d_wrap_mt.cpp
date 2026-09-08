@@ -35,18 +35,42 @@
 
 #include <thread>
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 // A wait on the clock, not on the OS sleep. OS::delay_usec is Sleep(1) on Windows for anything
 // under a millisecond: a millisecond or two at best, 15 ms when the process loses its timer
 // resolution, and a kilohertz loop cannot pay that per slice (the first runs ticked at a
 // fraction of the rate and every park cost the main thread tens of milliseconds). Long waits
 // take one OS sleep with a margin; the rest is spent on the clock, yielding the core between
 // reads so a ready thread can have it.
+//
+// LINUX SLEEPS INSTEAD. nanosleep there is a high-resolution timer, and with the thread's timer
+// slack cut to a microsecond (the loop does that on entry) it returns within a few tens of
+// microseconds of the request, so the margin is 80 us rather than 1500 and a 200 us slice is
+// mostly asleep. Measured on the Linux machine (2026-09-08, MacBookPro16,1, top -H): with the
+// yield-spin the physics thread held a full core and the EDITOR's parked copy held another, 80% of
+// it in sched_yield, and the heat of the spinning threads is what tripped that machine's firmware
+// clamp to 800 MHz every twenty seconds. Windows and macOS keep the spin: Sleep(1) is coarse, mach
+// nanosleep overshoots by hundreds of microseconds, and neither has been measured (PLATFORM-PARITY
+// THR-2: measure before changing).
+#if defined(__linux__)
+static const uint64_t FREE_WAIT_SLEEP_MARGIN_USEC = 80;
+#endif
+
 static void _free_wait_usec(uint64_t p_usec) {
 	OS *os = OS::get_singleton();
 	const uint64_t target = os->get_ticks_usec() + p_usec;
+#if defined(__linux__)
+	if (p_usec > FREE_WAIT_SLEEP_MARGIN_USEC) {
+		os->delay_usec((uint32_t)(p_usec - FREE_WAIT_SLEEP_MARGIN_USEC));
+	}
+#else
 	if (p_usec > 2500) {
 		os->delay_usec((uint32_t)(p_usec - 1500));
 	}
+#endif
 	while (os->get_ticks_usec() < target) {
 		std::this_thread::yield();
 	}
@@ -122,7 +146,15 @@ void PhysicsServer3DWrapMT::set_free_running_paused(bool p_paused) {
 }
 
 void PhysicsServer3DWrapMT::_free_thread_loop() {
-	Thread::set_name("PhysicsServer3D free-running");
+	// Fifteen characters at most: Linux's pthread_setname_np rejects a longer name outright, and the
+	// thread then shows in top -H under the process name, which is how it hid on 2026-09-08.
+	Thread::set_name("PhysicsFreeRun");
+#if defined(__linux__)
+	// The default timer slack is 50 us, most of the slice this loop sleeps for. One microsecond makes
+	// nanosleep return close to the request, so _free_wait_usec can sleep for nearly all of a wait.
+	// Per thread: nothing else in the process changes.
+	prctl(PR_SET_TIMERSLACK, 1000);
+#endif
 	OS *os = OS::get_singleton();
 	Engine *engine = Engine::get_singleton();
 	uint64_t next_tick_usec = os->get_ticks_usec();
@@ -144,11 +176,17 @@ void PhysicsServer3DWrapMT::_free_thread_loop() {
 			free_parked.store(true);
 			free_park_acks.fetch_add(1);
 			// Idle, the parked wait is an OS sleep too: a command waits a millisecond or two, and
-			// the core is free.
+			// the core is free. On Linux the short parked wait is an OS sleep as well: the release
+			// is noticed within about a hundred microseconds, which the tick debt absorbs, and the
+			// main loop's per-frame window stops costing a core.
 			if (free_idle.load()) {
 				os->delay_usec(1000);
 			} else {
+#if defined(__linux__)
+				os->delay_usec(50);
+#else
 				_free_wait_usec(50);
+#endif
 			}
 			// The clock keeps running through a park. A short one (the main loop's per-frame
 			// window, a couple of milliseconds) is caught up at the cap below, so simulated time
@@ -381,7 +419,11 @@ PhysicsServer3DWrapMT::PhysicsServer3DWrapMT(PhysicsServer3D *p_contained, bool 
 	physics_server_3d = p_contained;
 	create_thread = p_create_thread;
 #ifdef THREADS_ENABLED
-	free_running = create_thread && (bool)GLOBAL_GET("physics/3d/free_running");
+	// Never in the editor or the project manager. The loop holds its tick rate on a core for the
+	// life of the process and an editor's world has nothing to step; on 2026-09-08 the editor's copy
+	// had spent 44 CPU-minutes spinning beside the game it had launched. The editor keeps the stock
+	// threaded server (the pool task in init), which sleeps until a command arrives.
+	free_running = create_thread && (bool)GLOBAL_GET("physics/3d/free_running") && !Engine::get_singleton()->is_editor_hint();
 	free_unthrottled = (bool)GLOBAL_GET("physics/3d/free_running_unthrottled");
 	free_max_catchup = MAX(1, (int)GLOBAL_GET("physics/3d/free_running_max_catchup_steps"));
 #endif
