@@ -46,7 +46,7 @@
 	NSButton *zoom_button;
 }
 
-- (void)initButtons:(CGFloat)button_spacing offset:(NSPoint)button_offset rtl:(bool)is_rtl;
+- (void)initButtons:(CGFloat)button_spacing offset:(NSPoint)button_offset rtl:(bool)is_rtl window:(NSWindow *)p_window;
 - (void)displayButtons;
 - (void)setOffset:(NSPoint)button_offset;
 - (NSPoint)getOffset;

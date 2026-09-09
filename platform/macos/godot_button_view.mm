@@ -47,19 +47,25 @@
 	return self;
 }
 
-- (void)initButtons:(CGFloat)button_spacing offset:(NSPoint)button_offset rtl:(bool)is_rtl {
+- (void)initButtons:(CGFloat)button_spacing offset:(NSPoint)button_offset rtl:(bool)is_rtl window:(NSWindow *)p_window {
 	spacing = button_spacing;
 	rtl = is_rtl;
 
-	close_button = [NSWindow standardWindowButton:NSWindowCloseButton forStyleMask:NSWindowStyleMaskTitled];
+	// Adopt the WINDOW'S OWN buttons rather than building detached copies with
+	// +[NSWindow standardWindowButton:forStyleMask:]. A copy has no window association, and on
+	// macOS 26 such a button no longer renders its hover glyph from the _mouseInGroup: hook.
+	close_button = p_window ? [p_window standardWindowButton:NSWindowCloseButton]
+							: [NSWindow standardWindowButton:NSWindowCloseButton forStyleMask:NSWindowStyleMaskTitled];
 	[close_button setFrameOrigin:NSMakePoint(rtl ? spacing * 2 : 0, 0)];
 	[self addSubview:close_button];
 
-	miniaturize_button = [NSWindow standardWindowButton:NSWindowMiniaturizeButton forStyleMask:NSWindowStyleMaskTitled];
+	miniaturize_button = p_window ? [p_window standardWindowButton:NSWindowMiniaturizeButton]
+								  : [NSWindow standardWindowButton:NSWindowMiniaturizeButton forStyleMask:NSWindowStyleMaskTitled];
 	[miniaturize_button setFrameOrigin:NSMakePoint(spacing, 0)];
 	[self addSubview:miniaturize_button];
 
-	zoom_button = [NSWindow standardWindowButton:NSWindowZoomButton forStyleMask:NSWindowStyleMaskTitled];
+	zoom_button = p_window ? [p_window standardWindowButton:NSWindowZoomButton]
+						  : [NSWindow standardWindowButton:NSWindowZoomButton forStyleMask:NSWindowStyleMaskTitled];
 	[zoom_button setFrameOrigin:NSMakePoint(rtl ? 0 : spacing * 2, 0)];
 	[self addSubview:zoom_button];
 

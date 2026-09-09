@@ -2487,12 +2487,8 @@ void DisplayServerMacOS::window_set_custom_window_buttons(WindowData &p_wd, bool
 
 		[p_wd.window_object setTitlebarAppearsTransparent:YES];
 		[p_wd.window_object setTitleVisibility:NSWindowTitleHidden];
-		[[p_wd.window_object standardWindowButton:NSWindowZoomButton] setHidden:YES];
-		[[p_wd.window_object standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
-		[[p_wd.window_object standardWindowButton:NSWindowCloseButton] setHidden:YES];
-
 		p_wd.window_button_view = [[GodotButtonView alloc] initWithFrame:NSZeroRect];
-		[p_wd.window_button_view initButtons:window_buttons_spacing offset:NSMakePoint(p_wd.wb_offset.x, p_wd.wb_offset.y) rtl:is_rtl];
+		[p_wd.window_button_view initButtons:window_buttons_spacing offset:NSMakePoint(p_wd.wb_offset.x, p_wd.wb_offset.y) rtl:is_rtl window:p_wd.window_object];
 		[p_wd.window_view addSubview:p_wd.window_button_view];
 
 		[[p_wd.window_object standardWindowButton:NSWindowMiniaturizeButton] setHidden:(p_wd.no_min_btn && p_wd.no_max_btn)];
