@@ -114,6 +114,10 @@
 	tracking_area = [[NSTrackingArea alloc] initWithRect:NSZeroRect options:options owner:self userInfo:nil];
 
 	[self addTrackingArea:tracking_area];
+	// AppKit requires updateTrackingAreas overrides to call super; GodotContentView does, this
+	// did not. Without it the tracking area is never armed on macOS 26, so mouseEntered/Exited
+	// never fire, mouse_in_group stays false and _mouseInGroup: answers NO to every query.
+	[super updateTrackingAreas];
 }
 
 - (void)mouseEntered:(NSEvent *)event {
