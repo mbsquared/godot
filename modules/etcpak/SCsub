@@ -6,6 +6,11 @@ Import("env_modules")
 
 env_etcpak = env_modules.Clone()
 
+# The encoder builds into the editor, and into export templates only with etcpak_export_templates,
+# so an app can compress textures for the GPU at run time. The decoder always builds.
+if env.editor_build or env["etcpak_export_templates"]:
+    env_etcpak.Append(CPPDEFINES=["ETCPAK_ENCODER_ENABLED"])
+
 # Thirdparty source files
 
 thirdparty_obj = []
