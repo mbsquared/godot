@@ -1300,7 +1300,7 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 
 				if (scene_state.used_screen_texture) {
 					// Copy screen texture to backbuffer so we can read from it
-					_render_buffers_copy_screen_texture(p_render_data);
+					_render_buffers_copy_screen_texture(p_render_data, scene_state.used_screen_texture_mipmaps);
 				}
 			}
 
@@ -2061,6 +2061,7 @@ void RenderForwardMobile::_fill_render_list(RenderListType p_render_list, const 
 
 	if (p_render_list == RENDER_LIST_OPAQUE) {
 		scene_state.used_screen_texture = false;
+		scene_state.used_screen_texture_mipmaps = false;
 		scene_state.used_depth_texture = false;
 		scene_state.used_lightmap = false;
 	}
@@ -2216,6 +2217,9 @@ void RenderForwardMobile::_fill_render_list(RenderListType p_render_list, const 
 
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_SCREEN_TEXTURE) {
 					scene_state.used_screen_texture = true;
+				}
+				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_SCREEN_TEXTURE_MIPMAPS) {
+					scene_state.used_screen_texture_mipmaps = true;
 				}
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DEPTH_TEXTURE) {
 					scene_state.used_depth_texture = true;
@@ -2744,6 +2748,10 @@ void RenderForwardMobile::_geometry_instance_add_surface_with_material(GeometryI
 	if (p_material->shader_data->uses_screen_texture) {
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_USES_SCREEN_TEXTURE;
 		global_surface_data.screen_texture_used = true;
+	}
+
+	if (p_material->shader_data->uses_screen_texture_mipmaps) {
+		flags |= GeometryInstanceSurfaceDataCache::FLAG_USES_SCREEN_TEXTURE_MIPMAPS;
 	}
 
 	if (p_material->shader_data->uses_depth_texture) {

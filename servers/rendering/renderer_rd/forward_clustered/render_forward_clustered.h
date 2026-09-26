@@ -410,6 +410,7 @@ private:
 		uint32_t voxelgis_used = 0;
 
 		bool used_screen_texture = false;
+		bool used_screen_texture_mipmaps = false;
 		bool used_normal_texture = false;
 		bool used_depth_texture = false;
 		bool used_sss = false;
@@ -493,6 +494,7 @@ private:
 			FLAG_USES_PARTICLE_TRAILS = 65536,
 			FLAG_USES_MOTION_VECTOR = 131072,
 			FLAG_USES_STENCIL = 262144,
+			FLAG_USES_SCREEN_TEXTURE_MIPMAPS = 524288,
 		};
 
 		union {

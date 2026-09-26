@@ -290,6 +290,7 @@ private:
 		RID lightmap_capture_buffer;
 
 		bool used_screen_texture = false;
+		bool used_screen_texture_mipmaps = false;
 		bool used_depth_texture = false;
 		bool used_lightmap = false;
 		bool used_opaque_stencil = false;
@@ -471,6 +472,7 @@ protected:
 			FLAG_USES_DOUBLE_SIDED_SHADOWS = 32768,
 			FLAG_USES_PARTICLE_TRAILS = 65536,
 			FLAG_USES_STENCIL = 131072,
+			FLAG_USES_SCREEN_TEXTURE_MIPMAPS = 262144,
 		};
 
 		union {

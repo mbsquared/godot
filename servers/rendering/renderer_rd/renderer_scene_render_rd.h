@@ -108,7 +108,7 @@ protected:
 	bool _has_compositor_effect(RS::CompositorEffectCallbackType p_callback_type, const RenderDataRD *p_render_data);
 	void _process_compositor_effects(RS::CompositorEffectCallbackType p_callback_type, const RenderDataRD *p_render_data);
 	void _render_buffers_ensure_screen_texture(const RenderDataRD *p_render_data);
-	void _render_buffers_copy_screen_texture(const RenderDataRD *p_render_data);
+	void _render_buffers_copy_screen_texture(const RenderDataRD *p_render_data, bool p_generate_mipmaps = true);
 	void _render_buffers_ensure_depth_texture(const RenderDataRD *p_render_data);
 	void _render_buffers_copy_depth_texture(const RenderDataRD *p_render_data, bool p_use_msaa = false);
 	void _render_buffers_post_process_and_tonemap(const RenderDataRD *p_render_data, bool p_use_msaa = false);

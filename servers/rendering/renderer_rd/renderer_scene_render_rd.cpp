@@ -345,7 +345,7 @@ void RendererSceneRenderRD::_render_buffers_ensure_screen_texture(const RenderDa
 	}
 }
 
-void RendererSceneRenderRD::_render_buffers_copy_screen_texture(const RenderDataRD *p_render_data) {
+void RendererSceneRenderRD::_render_buffers_copy_screen_texture(const RenderDataRD *p_render_data, bool p_generate_mipmaps) {
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	ERR_FAIL_COND(rb.is_null());
 
@@ -373,7 +373,12 @@ void RendererSceneRenderRD::_render_buffers_copy_screen_texture(const RenderData
 
 	for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 		RID texture = rb->get_internal_texture(v);
-		int mipmaps = int(rb->get_texture_format(RB_SCOPE_BUFFERS, texture_name).mipmaps);
+		// The blurred mip chain is only for shaders that sample the screen with a mipmap filter. A shader
+		// that samples it with a plain linear or nearest filter is clamped to level 0 by its sampler
+		// (max_lod 0), so the chain would be built every frame and never read. texelFetch ignores the
+		// sampler, so a fetch above level 0 from such a shader reads whatever those levels last held:
+		// the same contract the canvas renderer has had since it started skipping the chain this way.
+		int mipmaps = p_generate_mipmaps ? int(rb->get_texture_format(RB_SCOPE_BUFFERS, texture_name).mipmaps) : 1;
 		RID dest = rb->get_texture_slice(RB_SCOPE_BUFFERS, texture_name, v, 0);
 
 		if (can_use_storage) {
