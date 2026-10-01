@@ -845,6 +845,17 @@ public:
 	virtual uint64_t get_free_running_tick_count() const { return 0; }
 	virtual double get_free_running_last_tick_usec() const { return 0.0; }
 	virtual double get_free_running_last_step_usec() const { return 0.0; }
+	// One clock: the loop steps at boundaries of simulated time an application publishes in a
+	// block of 8-byte slots it owns, never on the wall (see PhysicsServer3DWrapMT). Inert until an
+	// application installs a block and turns following on.
+	virtual void set_free_running_follow_block(int64_t p_address) {}
+	virtual void set_free_running_follow(bool p_follow) {}
+	virtual bool is_free_running_following() const { return false; }
+	virtual uint64_t get_free_running_follow_wait_usec() const { return 0; }
+	virtual uint64_t get_free_running_follow_retries() const { return 0; }
+	// Simulated seconds the loop has stepped outside idle, in every mode: the physics real-time
+	// multiplier is its change over a change of wall time.
+	virtual double get_free_running_stepped_seconds() const { return 0.0; }
 
 	virtual bool is_flushing_queries() const = 0;
 

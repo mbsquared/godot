@@ -964,6 +964,12 @@ void PhysicsServer3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_free_running_tick_count"), &PhysicsServer3D::get_free_running_tick_count);
 	ClassDB::bind_method(D_METHOD("get_free_running_last_tick_usec"), &PhysicsServer3D::get_free_running_last_tick_usec);
 	ClassDB::bind_method(D_METHOD("get_free_running_last_step_usec"), &PhysicsServer3D::get_free_running_last_step_usec);
+	ClassDB::bind_method(D_METHOD("set_free_running_follow_block", "address"), &PhysicsServer3D::set_free_running_follow_block);
+	ClassDB::bind_method(D_METHOD("set_free_running_follow", "follow"), &PhysicsServer3D::set_free_running_follow);
+	ClassDB::bind_method(D_METHOD("is_free_running_following"), &PhysicsServer3D::is_free_running_following);
+	ClassDB::bind_method(D_METHOD("get_free_running_follow_wait_usec"), &PhysicsServer3D::get_free_running_follow_wait_usec);
+	ClassDB::bind_method(D_METHOD("get_free_running_follow_retries"), &PhysicsServer3D::get_free_running_follow_retries);
+	ClassDB::bind_method(D_METHOD("get_free_running_stepped_seconds"), &PhysicsServer3D::get_free_running_stepped_seconds);
 
 	ClassDB::bind_method(D_METHOD("hinge_joint_set_param", "joint", "param", "value"), &PhysicsServer3D::hinge_joint_set_param);
 	ClassDB::bind_method(D_METHOD("hinge_joint_get_param", "joint", "param"), &PhysicsServer3D::hinge_joint_get_param);

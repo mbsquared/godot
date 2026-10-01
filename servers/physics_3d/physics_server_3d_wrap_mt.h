@@ -100,6 +100,26 @@ class PhysicsServer3DWrapMT : public PhysicsServer3D {
 	bool free_synced = false;                  // main thread only: sync() parked the loop and end_sync() owes the release
 	Mutex free_callback_mutex;
 	Callable free_callback;
+	// One clock (CRUMB). While following and not idle, the loop steps only when the application's
+	// master clock publishes a boundary of simulated time, and only after the callback for that
+	// boundary has run. The block is the application's: 16 slots, 64-byte aligned, never freed.
+	//   [0] last boundary published (a sequence number, stored last with release)
+	//   [1] its step in seconds (double bits), written before [0]
+	//   [8] last boundary served: the callback writes it once its reads and writes of the
+	//       application's state are done, and the master runs on from there
+	//   [9] the boundary whose callback is running now, 0 for any other callback
+	// Slots 0 to 7 and 8 to 15 sit on separate cache lines, one per writing thread. The loop never
+	// compares times and never reads the tick rate in this mode.
+	std::atomic<std::atomic<int64_t> *> follow_block{ nullptr };
+	std::atomic<bool> free_follow{ false };
+	std::atomic<uint64_t> free_follow_wait_usec{ 0 };
+	std::atomic<uint64_t> free_follow_retries{ 0 };
+	std::atomic<double> free_stepped_seconds{ 0.0 }; // physics thread writes, anyone reads
+	static_assert(sizeof(std::atomic<int64_t>) == 8 && std::atomic<int64_t>::is_always_lock_free,
+			"the follow block's slots are plain 8-byte words shared with the application");
+
+	bool _free_run_callback(double p_delta); // false only when the callback returned false
+	void _free_run_step(double p_delta, uint64_t p_tick_start_usec);
 
 	static void _free_thread_entry(void *p_self);
 	void _free_thread_loop();
@@ -462,6 +482,12 @@ public:
 	virtual double get_free_running_last_step_usec() const override { return (double)free_last_step_usec.load(); }
 	virtual uint64_t get_free_running_parked_usec() const override { return free_parked_usec.load(); }
 	virtual uint64_t get_free_running_park_count() const override { return free_park_count.load(); }
+	virtual void set_free_running_follow_block(int64_t p_address) override;
+	virtual void set_free_running_follow(bool p_follow) override { free_follow.store(p_follow, std::memory_order_release); }
+	virtual bool is_free_running_following() const override { return free_running && free_follow.load(); }
+	virtual uint64_t get_free_running_follow_wait_usec() const override { return free_follow_wait_usec.load(); }
+	virtual uint64_t get_free_running_follow_retries() const override { return free_follow_retries.load(); }
+	virtual double get_free_running_stepped_seconds() const override { return free_stepped_seconds.load(); }
 
 	virtual bool is_flushing_queries() const override {
 		return physics_server_3d->is_flushing_queries();

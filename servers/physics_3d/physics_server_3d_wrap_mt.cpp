@@ -33,6 +33,7 @@
 #include "core/config/engine.h"
 #include "core/os/os.h"
 
+#include <cstring>
 #include <thread>
 
 #if defined(__linux__)
@@ -145,6 +146,53 @@ void PhysicsServer3DWrapMT::set_free_running_paused(bool p_paused) {
 	}
 }
 
+void PhysicsServer3DWrapMT::set_free_running_follow_block(int64_t p_address) {
+	std::atomic<int64_t> *block = reinterpret_cast<std::atomic<int64_t> *>(p_address);
+	if (block == follow_block.load()) {
+		return; // the same block again (a second host installing it) is nothing to do
+	}
+	ERR_FAIL_COND_MSG(free_follow.load(), "The follow block cannot change while the loop follows it.");
+	ERR_FAIL_COND_MSG((p_address & 63) != 0, "The follow block must be 64-byte aligned.");
+	follow_block.store(block, std::memory_order_release);
+}
+
+// The tick. Jolt's doing_sync is held across the callback so its state getters accept this
+// thread (the same window the main thread's physics callbacks had). A callback that returns
+// false is asking to be called again for the same boundary; any other return, or none, is a go.
+bool PhysicsServer3DWrapMT::_free_run_callback(double p_delta) {
+	physics_server_3d->sync();
+	Callable cb;
+	{
+		MutexLock lock(free_callback_mutex);
+		cb = free_callback;
+	}
+	bool go = true;
+	if (cb.is_valid()) {
+		Variant delta_variant = p_delta;
+		const Variant *args[1] = { &delta_variant };
+		Callable::CallError ce;
+		Variant ret;
+		cb.callp(args, 1, ret, ce);
+		if (unlikely(ce.error != Callable::CallError::CALL_OK)) {
+			ERR_PRINT_ONCE("PhysicsServer3D free-running callback failed: " + Variant::get_callable_error_text(cb, args, 1, ce));
+		} else if (ret.get_type() == Variant::BOOL && !(bool)ret) {
+			go = false;
+		}
+	}
+	physics_server_3d->end_sync();
+	return go;
+}
+
+void PhysicsServer3DWrapMT::_free_run_step(double p_delta, uint64_t p_tick_start_usec) {
+	OS *os = OS::get_singleton();
+	const uint64_t step_begin = os->get_ticks_usec();
+	physics_server_3d->step((real_t)p_delta);
+	const uint64_t step_end = os->get_ticks_usec();
+	free_last_step_usec.store(step_end - step_begin);
+	free_last_tick_usec.store(step_end - p_tick_start_usec);
+	free_tick_count.fetch_add(1);
+}
+
 void PhysicsServer3DWrapMT::_free_thread_loop() {
 	// Fifteen characters at most: Linux's pthread_setname_np rejects a longer name outright, and the
 	// thread then shows in top -H under the process name, which is how it hid on 2026-09-08.
@@ -201,10 +249,74 @@ void PhysicsServer3DWrapMT::_free_thread_loop() {
 		}
 		free_parked.store(false);
 
+		// ONE snapshot of the idle flag per iteration, read BEFORE the follow flag and used by both
+		// paths below. The application engages by storing follow, then lifting idle; read in this
+		// order, a loop that sees idle lifted also sees follow on, so it can never take a wall paced
+		// step of a live world while it should be following. It releases in the reverse order under
+		// a park.
+		const bool idle = free_idle.load(std::memory_order_acquire);
+
+		// ONE CLOCK. The application's master clock publishes boundaries of simulated time and holds
+		// at each until it is served. The loop runs the callback for the boundary (which serves it
+		// once the application's own state has been read and written), then steps exactly the step
+		// the master gave. It never steps on the wall, so physics can never start an interval the
+		// master has not reached, and a step that takes too long slows the master with it: both run
+		// in slow motion together rather than one of them dropping time. Idle wins: a world standing
+		// still steps at the token rate as before, and a boundary published meanwhile waits.
+		std::atomic<int64_t> *block = follow_block.load(std::memory_order_acquire);
+		if (!idle && block != nullptr && free_follow.load(std::memory_order_acquire)) {
+			const uint64_t w0 = os->get_ticks_usec();
+			const int64_t served = block[8].load(std::memory_order_acquire);
+			int64_t request = block[0].load(std::memory_order_acquire);
+			// Poll on yields, but come back to the top within 50 us, so commands and parks are always
+			// served while waiting: a park or a fence can never deadlock against this wait. Linux
+			// polls on short OS sleeps instead, as the rest of this loop does there; unmeasured
+			// (PLATFORM-PARITY THR-2).
+			while (request <= served && os->get_ticks_usec() - w0 < 50) {
+#if defined(__linux__)
+				os->delay_usec(20);
+#else
+				std::this_thread::yield();
+#endif
+				request = block[0].load(std::memory_order_acquire);
+			}
+			free_follow_wait_usec.fetch_add(os->get_ticks_usec() - w0);
+			if (request <= served) {
+				continue;
+			}
+			const int64_t bits = block[1].load(std::memory_order_relaxed);
+			double step;
+			memcpy(&step, &bits, sizeof(step));
+			if (!(step > 0.0) || step > 1.0) {
+				ERR_PRINT_ONCE("PhysicsServer3D one clock: a boundary's step is not a sane number of seconds; stepping one tick period.");
+				step = 1.0 / MAX(1, engine->get_physics_ticks_per_second());
+			}
+			const uint64_t tick_start = os->get_ticks_usec();
+			block[9].store(request, std::memory_order_release);
+			const bool go = _free_run_callback(step);
+			block[9].store(0, std::memory_order_release);
+			if (!go) {
+				// The application could not run its part of this boundary yet (its tick lock was held,
+				// or its world is between states). Come back for the SAME boundary: a boundary is never
+				// stepped without its callback, and never skipped.
+				free_follow_retries.fetch_add(1);
+				_free_wait_usec(20);
+				continue;
+			}
+			if (block[8].load(std::memory_order_acquire) < request) {
+				block[8].store(request, std::memory_order_release); // a callback that did not serve it itself
+			}
+			_free_run_step(step, tick_start);
+			free_stepped_seconds.store(free_stepped_seconds.load(std::memory_order_relaxed) + step, std::memory_order_release);
+			// Leaving follow must never burst: the wall pacing starts from now with no debt.
+			next_tick_usec = last_step_start_usec = os->get_ticks_usec();
+			free_sim_debt_usec = 0;
+			continue;
+		}
+
 		// Idle: a token rate on OS sleeps. The world keeps stepping (pending bodies enter the
 		// broadphase, monitors and contacts stay current) at no cost; the tick rate and the
 		// unthrottled pacing return the moment the application lifts it.
-		const bool idle = free_idle.load();
 		const int tps = idle ? FREE_IDLE_TPS : MAX(1, engine->get_physics_ticks_per_second());
 		const double period = 1.0 / tps;
 		const uint64_t period_usec = MAX((uint64_t)1, (uint64_t)(period * 1000000.0));
@@ -286,32 +398,11 @@ void PhysicsServer3DWrapMT::_free_thread_loop() {
 		last_step_start_usec = now;
 		delta *= engine->get_effective_time_scale();
 
-		// The tick. Jolt's doing_sync is held across the callback so its state getters accept
-		// this thread (the same window the main thread's physics callbacks had).
-		physics_server_3d->sync();
-		Callable cb;
-		{
-			MutexLock lock(free_callback_mutex);
-			cb = free_callback;
+		_free_run_callback(delta); // the return is ignored off the one clock, which is today's behaviour
+		_free_run_step(delta, now);
+		if (!idle) {
+			free_stepped_seconds.store(free_stepped_seconds.load(std::memory_order_relaxed) + delta, std::memory_order_release);
 		}
-		if (cb.is_valid()) {
-			Variant delta_variant = delta;
-			const Variant *args[1] = { &delta_variant };
-			Callable::CallError ce;
-			Variant ret;
-			cb.callp(args, 1, ret, ce);
-			if (unlikely(ce.error != Callable::CallError::CALL_OK)) {
-				ERR_PRINT_ONCE("PhysicsServer3D free-running callback failed: " + Variant::get_callable_error_text(cb, args, 1, ce));
-			}
-		}
-		physics_server_3d->end_sync();
-
-		const uint64_t step_begin = os->get_ticks_usec();
-		physics_server_3d->step((real_t)delta);
-		const uint64_t step_end = os->get_ticks_usec();
-		free_last_step_usec.store(step_end - step_begin);
-		free_last_tick_usec.store(step_end - now);
-		free_tick_count.fetch_add(1);
 	}
 }
 
