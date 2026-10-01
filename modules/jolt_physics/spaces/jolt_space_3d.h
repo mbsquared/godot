@@ -78,6 +78,10 @@ class JoltSpace3D {
 
 	float last_step = 0.0f;
 
+	// CRUMB: the serial of this space's last step, from one counter shared by every space, so no two
+	// steps of any spaces share one. A body's solved-contact slot written in another step reads zero.
+	uint64_t step_serial = 0;
+
 	bool active = false;
 	bool stepping = false;
 
@@ -141,6 +145,7 @@ public:
 	void set_default_area(JoltArea3D *p_area);
 
 	float get_last_step() const { return last_step; }
+	uint64_t get_step_serial() const { return step_serial; }
 
 	JPH::Body *add_object(const JoltObject3D &p_object, const JPH::BodyCreationSettings &p_settings, bool p_sleeping = false);
 	JPH::Body *add_object(const JoltObject3D &p_object, const JPH::SoftBodyCreationSettings &p_settings, bool p_sleeping = false);

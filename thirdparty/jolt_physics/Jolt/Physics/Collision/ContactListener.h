@@ -49,6 +49,24 @@ public:
 	bool					mIsSensor;							///< If the contact should be treated as a sensor vs body contact (no collision response)
 	Vec3					mRelativeLinearSurfaceVelocity = Vec3::sZero(); ///< Relative linear surface velocity between the bodies (world space surface velocity of body 2 - world space surface velocity of body 1), can be used to create a conveyor belt effect
 	Vec3					mRelativeAngularSurfaceVelocity = Vec3::sZero(); ///< Relative angular surface velocity between the bodies (world space angular surface velocity of body 2 - world space angular surface velocity of body 1). Note that this angular velocity is relative to the center of mass of body 1, so if you want it relative to body 2's center of mass you need to add body 2 angular velocity x (body 1 world space center of mass - body 2 world space center of mass) to mRelativeLinearSurfaceVelocity.
+	// CRUMB: ask for ContactListener::OnContactSolved on this manifold after the velocity solve. It
+	// changes nothing the solver does.
+	bool					mReportSolved = false;
+};
+
+// CRUMB: what the solver applied to one manifold over the step, on body 2 (body 1 takes the opposite).
+// Built after the velocity iterations from the total impulses, so it is what the bodies felt, not an
+// estimate made before the solve. Positions are not integrated yet when it is built, so the bodies
+// are where the solve saw them.
+struct ContactSolvedReport
+{
+	Vec3					mWorldNormal;						// From body 1 to body 2
+	RVec3					mCentre;							// Normal-impulse-weighted contact point (world); the plain mean of the points when nothing pressed
+	Vec3					mLinearImpulse;						// Total impulse on body 2, normal plus friction (world)
+	Vec3					mAngularImpulse;					// Moment of the impulses about mCentre on body 2 (world), twist and tilt included
+	float					mNormalImpulse;						// Sum of the pressing impulses, never negative
+	float					mArea;								// A soft patch's contact area, 0 for a rigid manifold
+	float					mFrictionUse;						// 0 to 1: the friction impulses' magnitudes over their limit, summed over the points (1 = sliding)
 };
 
 /// Return value for the OnContactValidate callback. Determines if the contact is being processed or not.
@@ -138,6 +156,11 @@ public:
 	/// the sub shape ID may not be valid / may not point to the same sub shape anymore.
 	/// If you want to know if this is the last contact between the two bodies, use PhysicsSystem::WereBodiesInContact.
 	virtual void			OnContactRemoved([[maybe_unused]] const SubShapeIDPair &inSubShapePair) { /* Do nothing */ }
+
+	// CRUMB: called after the velocity solve for every manifold whose settings asked for it
+	// (ContactSettings::mReportSolved), with what the solver applied over the step. Called from the
+	// solver with the bodies locked, like OnContactAdded: read only. Body 1 and 2 are the constraint's.
+	virtual void			OnContactSolved([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, [[maybe_unused]] const SubShapeIDPair &inSubShapePair, [[maybe_unused]] const ContactSolvedReport &inReport) { /* Do nothing */ }
 };
 
 JPH_NAMESPACE_END

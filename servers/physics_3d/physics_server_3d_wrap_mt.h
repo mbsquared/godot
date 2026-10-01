@@ -290,6 +290,19 @@ public:
 	FUNC1RC(bool, body_is_applying_gyroscopic_force, RID);
 	FUNC1RC(PackedFloat64Array, shapes_get_volume_properties, const TypedArray<RID> &);
 
+	// CRUMB: the contact-force read, and the soft-surface signatures.
+	FUNC2(body_set_contact_force_tracking, RID, bool);
+	FUNC3RC(Vector3, body_get_contact_force, RID, int, int);
+	FUNC3RC(Vector3, body_get_contact_torque, RID, int, int);
+	FUNC3RC(real_t, body_get_contact_normal_force, RID, int, int);
+	FUNC3RC(Vector3, body_get_contact_point, RID, int, int);
+	FUNC3RC(real_t, body_get_contact_area, RID, int, int);
+	FUNC3RC(real_t, body_get_contact_friction_use, RID, int, int);
+	FUNC0RC(bool, soft_surfaces_available);
+	FUNC3(body_set_shape_soft_surface, RID, int, const PackedFloat32Array &);
+	FUNC1RC(PackedInt32Array, space_get_soft_contact_stats, RID);
+	FUNC5RC(PackedFloat32Array, space_debug_soft_patch, RID, RID, int, RID, int);
+
 	FUNC3(body_set_state, RID, BodyState, const Variant &);
 	FUNC2RC(Variant, body_get_state, RID, BodyState);
 

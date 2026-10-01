@@ -265,6 +265,14 @@ public:
 	virtual bool body_is_applying_gyroscopic_force(RID p_body) const override;
 	virtual PackedFloat64Array shapes_get_volume_properties(const TypedArray<RID> &p_shapes) const override;
 
+	virtual void body_set_contact_force_tracking(RID p_body, bool p_enable) override;
+	virtual Vector3 body_get_contact_force(RID p_body, int p_first_shape, int p_shape_count) const override;
+	virtual Vector3 body_get_contact_torque(RID p_body, int p_first_shape, int p_shape_count) const override;
+	virtual real_t body_get_contact_normal_force(RID p_body, int p_first_shape, int p_shape_count) const override;
+	virtual Vector3 body_get_contact_point(RID p_body, int p_first_shape, int p_shape_count) const override;
+	virtual real_t body_get_contact_area(RID p_body, int p_first_shape, int p_shape_count) const override;
+	virtual real_t body_get_contact_friction_use(RID p_body, int p_first_shape, int p_shape_count) const override;
+
 	virtual void body_set_state(RID p_body, PhysicsServer3D::BodyState p_state, const Variant &p_value) override;
 	virtual Variant body_get_state(RID p_body, PhysicsServer3D::BodyState p_state) const override;
 

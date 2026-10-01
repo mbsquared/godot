@@ -517,6 +517,40 @@ public:
 	// bake: each synchronous call waits for the physics loop.
 	virtual PackedFloat64Array shapes_get_volume_properties(const TypedArray<RID> &p_shapes) const { return PackedFloat64Array(); }
 
+	// CRUMB: what every contact did to this body over the last physics step, from the impulses the
+	// solver applied (not the estimate the contact monitor makes before the solve), summed over the
+	// shapes [p_first_shape, p_first_shape + p_shape_count) so a part welded into a larger body reads
+	// only its own colliders. The force is everything the contacts did to the body, pressing plus
+	// friction, in world space; the torque is its moment about the body's centre of mass; the normal
+	// force is the pressing part alone, never negative; the point is the centre of pressure in world
+	// space (zero out of contact); the area is a soft patch's, 0 for rigid contacts; the friction use
+	// is 0 to 1, 1 sliding. Tracking must be switched on first and changes no physics. Zero before the
+	// first step and for shapes nothing touched in the last step.
+	virtual void body_set_contact_force_tracking(RID p_body, bool p_enable) {}
+	virtual Vector3 body_get_contact_force(RID p_body, int p_first_shape, int p_shape_count) const { return Vector3(); }
+	virtual Vector3 body_get_contact_torque(RID p_body, int p_first_shape, int p_shape_count) const { return Vector3(); }
+	virtual real_t body_get_contact_normal_force(RID p_body, int p_first_shape, int p_shape_count) const { return 0; }
+	virtual Vector3 body_get_contact_point(RID p_body, int p_first_shape, int p_shape_count) const { return Vector3(); }
+	virtual real_t body_get_contact_area(RID p_body, int p_first_shape, int p_shape_count) const { return 0; }
+	virtual real_t body_get_contact_friction_use(RID p_body, int p_first_shape, int p_shape_count) const { return 0; }
+
+	// CRUMB: soft surfaces. Only the signatures are in this engine build: every server answers with
+	// these defaults until a build that models soft contact overrides them.
+	// Whether this engine build can make soft surfaces at all. The base answers false, so a build that
+	// carries only these signatures bakes every soft surface rigid.
+	virtual bool soft_surfaces_available() const { return false; }
+	// Makes one shape of a body a soft surface, in solver units: kind (0 none, 1 layer, 2 solid,
+	// 3 lumped), modulus, bulk modulus, thickness, lumped stiffness, travel, damping ratios for force
+	// laws of exponent 1, 1.5 and 2, hysteresis loss fraction, restitution, sliding friction (negative:
+	// the static one). An empty array makes it rigid. Bake time: refused while the space steps.
+	virtual void body_set_shape_soft_surface(RID p_body, int p_shape_idx, const PackedFloat32Array &p_params) {}
+	// Last step's soft contacts: patches, rows damped by the step, first-touch impacts, thick-regime
+	// patches, patches refused for want of room. Status line and probes only.
+	virtual PackedInt32Array space_get_soft_contact_stats(RID p_space) const { return PackedInt32Array(); }
+	// The patch figures for one shape pair now in contact (force, centre, stiffnesses, spin radius,
+	// rolling arms, area); probes and the bake's report only, main thread, parked.
+	virtual PackedFloat32Array space_debug_soft_patch(RID p_space, RID p_body_a, int p_shape_a, RID p_body_b, int p_shape_b) const { return PackedFloat32Array(); }
+
 	//state
 	enum BodyState {
 		BODY_STATE_TRANSFORM,

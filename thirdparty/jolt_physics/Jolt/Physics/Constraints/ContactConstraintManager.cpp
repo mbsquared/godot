@@ -966,6 +966,9 @@ void ContactConstraintManager::GetContactsFromCache(ContactAllocator &ioContactA
 			constraint.mInvInertiaScale1 = settings.mInvInertiaScale1;
 			constraint.mInvMass2 = body2->GetMotionPropertiesUnchecked() != nullptr? settings.mInvMassScale2 * body2->GetMotionPropertiesUnchecked()->GetInverseMassUnchecked() : 0.0f;
 			constraint.mInvInertiaScale2 = settings.mInvInertiaScale2;
+			constraint.mSubShapeID1 = input_key.GetSubShapeID1();
+			constraint.mSubShapeID2 = input_key.GetSubShapeID2();
+			constraint.mReportSolved = settings.mReportSolved;
 			constraint.mContactPoints.resize(output_cm->mNumContactPoints);
 			for (uint32 i = 0; i < output_cm->mNumContactPoints; ++i)
 			{
@@ -1140,6 +1143,9 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 		constraint.mInvInertiaScale1 = settings.mInvInertiaScale1;
 		constraint.mInvMass2 = inBody2.GetMotionPropertiesUnchecked() != nullptr? settings.mInvMassScale2 * inBody2.GetMotionPropertiesUnchecked()->GetInverseMassUnchecked() : 0.0f;
 		constraint.mInvInertiaScale2 = settings.mInvInertiaScale2;
+		constraint.mSubShapeID1 = inManifold.mSubShapeID1;
+		constraint.mSubShapeID2 = inManifold.mSubShapeID2;
+		constraint.mReportSolved = settings.mReportSolved;
 
 		JPH_DET_LOG("TemplatedAddContactConstraint: id1: " << constraint.mBody1->GetID() << " id2: " << constraint.mBody2->GetID() << " key: " << constraint.mSortKey);
 
@@ -1707,7 +1713,73 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintId
 			wcp.mContactPoint->mFrictionLambda[0] = wcp.mFrictionConstraint1.GetTotalLambda();
 			wcp.mContactPoint->mFrictionLambda[1] = wcp.mFrictionConstraint2.GetTotalLambda();
 		}
+
+		// CRUMB: report what the solve applied, for a manifold that asked
+		if (constraint.mReportSolved && mContactListener != nullptr && !constraint.mContactPoints.empty())
+			ReportSolvedContact(constraint);
 	}
+}
+
+void ContactConstraintManager::ReportSolvedContact(const ContactConstraint &inConstraint) const
+{
+	const Body &body1 = *inConstraint.mBody1;
+	const Body &body2 = *inConstraint.mBody2;
+
+	// The velocity solve does not move the bodies, so each point is rebuilt from the cached
+	// body-local positions exactly as the solve placed it: the midpoint of the two contact points.
+	RMat44 transform1 = body1.GetCenterOfMassTransform();
+	RMat44 transform2 = body2.GetCenterOfMassTransform();
+	Vec3 normal = inConstraint.GetWorldSpaceNormal();
+	Vec3 t1, t2;
+	inConstraint.GetTangents(t1, t2);
+
+	RVec3 points[MaxContactPoints];
+	Vec3 impulses[MaxContactPoints];
+	uint count = 0;
+	Vec3 linear = Vec3::sZero();
+	float normal_sum = 0.0f;
+	float friction_sum = 0.0f;
+	RVec3 weighted = RVec3::sZero();
+	RVec3 plain = RVec3::sZero();
+	for (const WorldContactPoint &wcp : inConstraint.mContactPoints)
+	{
+		RVec3 p1 = transform1 * Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition1);
+		RVec3 p2 = transform2 * Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition2);
+		RVec3 p = 0.5_r * (p1 + p2);
+		float lambda_n = max(wcp.mNonPenetrationConstraint.GetTotalLambda(), 0.0f);
+		float lambda_f1 = wcp.mFrictionConstraint1.GetTotalLambda();
+		float lambda_f2 = wcp.mFrictionConstraint2.GetTotalLambda();
+		Vec3 impulse = lambda_n * normal + lambda_f1 * t1 + lambda_f2 * t2;
+		points[count] = p;
+		impulses[count] = impulse;
+		++count;
+		linear += impulse;
+		normal_sum += lambda_n;
+		friction_sum += sqrt(Square(lambda_f1) + Square(lambda_f2));
+		weighted += Real(lambda_n) * p;
+		plain += p;
+	}
+
+	ContactSolvedReport report;
+	report.mWorldNormal = normal;
+	report.mCentre = normal_sum > 0.0f? weighted / Real(normal_sum) : plain / Real(count);
+	report.mLinearImpulse = linear;
+	Vec3 angular = Vec3::sZero();
+	for (uint i = 0; i < count; ++i)
+		angular += Vec3(points[i] - report.mCentre).Cross(impulses[i]);
+	report.mAngularImpulse = angular;
+	report.mNormalImpulse = normal_sum;
+	report.mArea = 0.0f;
+
+	// The solve clamps each point's friction to the combined friction times its pressing impulse, so
+	// the summed magnitudes over the summed limits is 1 exactly when every point slides. Summed rather
+	// than the largest point's share: a rigid manifold's split between its points is not determined,
+	// and one lightly pressed point can reach its limit while the manifold holds.
+	float limit = inConstraint.mCombinedFriction * normal_sum;
+	report.mFrictionUse = limit > 0.0f? min(friction_sum / limit, 1.0f) : (friction_sum > 0.0f? 1.0f : 0.0f);
+
+	SubShapeIDPair pair(body1.GetID(), inConstraint.mSubShapeID1, body2.GetID(), inConstraint.mSubShapeID2);
+	mContactListener->OnContactSolved(body1, body2, pair, report);
 }
 
 bool ContactConstraintManager::SolvePositionConstraints(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)

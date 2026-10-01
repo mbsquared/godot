@@ -118,6 +118,23 @@ private:
 	// CRUMB: at least one shape carries its own friction and bounce.
 	bool shape_surfaces = false;
 
+	// CRUMB: the contact-force read. One slot per shape, written by the contact listener after each
+	// velocity solve with what the solve applied (impulses, the moment about the centre of mass, the
+	// pressing impulse, the pressing-weighted sum of contact points, the area and the largest friction
+	// use). A slot written in any step but its space's last reads zero, so nothing ever clears it: a
+	// static body has no pre-step, and a static force plate must still read right.
+	struct SolvedContactSlot {
+		Vector3 impulse;
+		Vector3 angular_impulse;
+		Vector3 point_sum;
+		double normal_impulse = 0.0;
+		double area = 0.0;
+		float friction_use = 0.0f;
+		uint64_t serial = 0;
+	};
+	LocalVector<SolvedContactSlot> solved_contacts;
+	bool contact_force_tracking = false;
+
 	bool _uses_manifold_reduction() const;
 
 	virtual JPH::BroadPhaseLayer _get_broad_phase_layer() const override;
@@ -300,6 +317,16 @@ public:
 	// The friction and bounce of the shape a contact is on: its own when set, else the body's. Read
 	// only, from the space's combine callbacks during the step.
 	void get_contact_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id, float &r_friction, float &r_bounce) const;
+
+	// CRUMB: the contact-force read (see PhysicsServer3D::body_set_contact_force_tracking). Tracking
+	// changes nothing the solver does; switching it off forgets every slot.
+	bool is_tracking_contact_forces() const { return contact_force_tracking; }
+	void set_contact_force_tracking(bool p_enable);
+	// From the contact listener during the step: one manifold's solved impulses on this body, the
+	// moment about this body's centre of mass.
+	void add_solved_contact(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id, uint64_t p_serial, const Vector3 &p_impulse, const Vector3 &p_angular_impulse, float p_normal_impulse, const Vector3 &p_centre, float p_area, float p_friction_use);
+	// The sums over shapes [p_first, p_first + p_count) of the slots written in the space's last step.
+	void get_solved_contacts(int p_first, int p_count, Vector3 &r_impulse, Vector3 &r_angular_impulse, double &r_normal_impulse, Vector3 &r_point_sum, double &r_area, float &r_friction_use) const;
 
 	float get_bounce() const;
 	void set_bounce(float p_bounce);

@@ -870,6 +870,101 @@ bool JoltPhysicsServer3D::body_is_applying_gyroscopic_force(RID p_body) const {
 	return body->is_applying_gyroscopic_force();
 }
 
+void JoltPhysicsServer3D::body_set_contact_force_tracking(RID p_body, bool p_enable) {
+	JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+
+	body->set_contact_force_tracking(p_enable);
+}
+
+namespace {
+
+// CRUMB: one body's solved contacts over its space's last step on shapes [p_first_shape,
+// p_first_shape + p_shape_count), as rates: the impulses divided by the step. Zero out of a space,
+// before the first step, right after a rebuild, and for shapes nothing touched in the last step.
+struct ContactRead {
+	Vector3 force;
+	Vector3 torque;
+	Vector3 point;
+	real_t normal_force = 0.0;
+	real_t area = 0.0;
+	real_t friction_use = 0.0;
+};
+
+ContactRead read_contacts(const JoltBody3D &p_body, int p_first_shape, int p_shape_count) {
+	ContactRead read;
+
+	const JoltSpace3D *space = p_body.get_space();
+	if (space == nullptr) {
+		return read;
+	}
+
+	const float last_step = space->get_last_step();
+	if (last_step == 0.0f) {
+		return read;
+	}
+
+	Vector3 impulse;
+	Vector3 angular_impulse;
+	double normal_impulse = 0.0;
+	Vector3 point_sum;
+	double area = 0.0;
+	float friction_use = 0.0f;
+	p_body.get_solved_contacts(p_first_shape, p_shape_count, impulse, angular_impulse, normal_impulse, point_sum, area, friction_use);
+
+	read.force = impulse / last_step;
+	read.torque = angular_impulse / last_step;
+	read.normal_force = (real_t)(normal_impulse / last_step);
+	read.point = normal_impulse > 0.0 ? point_sum / (real_t)normal_impulse : Vector3();
+	read.area = (real_t)area;
+	read.friction_use = friction_use;
+	return read;
+}
+
+} // namespace
+
+Vector3 JoltPhysicsServer3D::body_get_contact_force(RID p_body, int p_first_shape, int p_shape_count) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, Vector3());
+
+	return read_contacts(*body, p_first_shape, p_shape_count).force;
+}
+
+Vector3 JoltPhysicsServer3D::body_get_contact_torque(RID p_body, int p_first_shape, int p_shape_count) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, Vector3());
+
+	return read_contacts(*body, p_first_shape, p_shape_count).torque;
+}
+
+real_t JoltPhysicsServer3D::body_get_contact_normal_force(RID p_body, int p_first_shape, int p_shape_count) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, 0.0);
+
+	return read_contacts(*body, p_first_shape, p_shape_count).normal_force;
+}
+
+Vector3 JoltPhysicsServer3D::body_get_contact_point(RID p_body, int p_first_shape, int p_shape_count) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, Vector3());
+
+	return read_contacts(*body, p_first_shape, p_shape_count).point;
+}
+
+real_t JoltPhysicsServer3D::body_get_contact_area(RID p_body, int p_first_shape, int p_shape_count) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, 0.0);
+
+	return read_contacts(*body, p_first_shape, p_shape_count).area;
+}
+
+real_t JoltPhysicsServer3D::body_get_contact_friction_use(RID p_body, int p_first_shape, int p_shape_count) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, 0.0);
+
+	return read_contacts(*body, p_first_shape, p_shape_count).friction_use;
+}
+
 PackedFloat64Array JoltPhysicsServer3D::shapes_get_volume_properties(const TypedArray<RID> &p_shapes) const {
 	PackedFloat64Array out;
 	out.resize(p_shapes.size() * 10);

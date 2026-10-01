@@ -469,8 +469,14 @@ private:
 		float					mInvInertiaScale1;
 		float					mInvMass2;
 		float					mInvInertiaScale2;
+		SubShapeID				mSubShapeID1;						// CRUMB: the manifold's sub-shapes, for OnContactSolved
+		SubShapeID				mSubShapeID2;
+		bool					mReportSolved = false;				// CRUMB: ContactSettings::mReportSolved
 		WorldContactPoints		mContactPoints;
 	};
+
+	// CRUMB: build one manifold's ContactSolvedReport from its total impulses and give it to the listener
+	void						ReportSolvedContact(const ContactConstraint &inConstraint) const;
 
 public:
 	/// The maximum value that can be passed to Init for inMaxContactConstraints. Note you should really use a lower value, using this value will cost a lot of memory!

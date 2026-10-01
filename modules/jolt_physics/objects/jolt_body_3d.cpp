@@ -1119,6 +1119,73 @@ void JoltBody3D::get_contact_surface(const JPH::Body &p_jolt_body, const JPH::Su
 	}
 }
 
+void JoltBody3D::set_contact_force_tracking(bool p_enable) {
+	contact_force_tracking = p_enable;
+
+	if (!p_enable) {
+		solved_contacts.clear();
+	}
+}
+
+void JoltBody3D::add_solved_contact(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id, uint64_t p_serial, const Vector3 &p_impulse, const Vector3 &p_angular_impulse, float p_normal_impulse, const Vector3 &p_centre, float p_area, float p_friction_use) {
+	const int index = find_shape_index((uint32_t)p_jolt_body.GetShape()->GetSubShapeUserData(p_sub_shape_id));
+	if (index < 0) {
+		return;
+	}
+
+	if ((uint32_t)index >= solved_contacts.size()) {
+		solved_contacts.resize((uint32_t)MAX(index + 1, (int)shapes.size()));
+	}
+
+	SolvedContactSlot &slot = solved_contacts[index];
+	if (slot.serial != p_serial) {
+		slot = SolvedContactSlot();
+		slot.serial = p_serial;
+	}
+
+	slot.impulse += p_impulse;
+	slot.angular_impulse += p_angular_impulse;
+	slot.point_sum += p_centre * p_normal_impulse;
+	slot.normal_impulse += p_normal_impulse;
+	slot.area += p_area;
+	slot.friction_use = MAX(slot.friction_use, p_friction_use);
+}
+
+void JoltBody3D::get_solved_contacts(int p_first, int p_count, Vector3 &r_impulse, Vector3 &r_angular_impulse, double &r_normal_impulse, Vector3 &r_point_sum, double &r_area, float &r_friction_use) const {
+	r_impulse = Vector3();
+	r_angular_impulse = Vector3();
+	r_normal_impulse = 0.0;
+	r_point_sum = Vector3();
+	r_area = 0.0;
+	r_friction_use = 0.0f;
+
+	const JoltSpace3D *body_space = get_space();
+	if (body_space == nullptr) {
+		return;
+	}
+
+	const uint64_t serial = body_space->get_step_serial();
+	if (serial == 0) {
+		return;
+	}
+
+	const int begin = MAX(p_first, 0);
+	const int end = MIN(p_first + MAX(p_count, 0), (int)solved_contacts.size());
+	for (int i = begin; i < end; ++i) {
+		const SolvedContactSlot &slot = solved_contacts[i];
+		if (slot.serial != serial) {
+			continue;
+		}
+
+		r_impulse += slot.impulse;
+		r_angular_impulse += slot.angular_impulse;
+		r_normal_impulse += slot.normal_impulse;
+		r_point_sum += slot.point_sum;
+		r_area += slot.area;
+		r_friction_use = MAX(r_friction_use, slot.friction_use);
+	}
+}
+
 void JoltBody3D::apply_force(const Vector3 &p_force, const Vector3 &p_position) {
 	ERR_FAIL_COND_MSG(!in_space(), vformat("Failed to apply force to '%s'. Doing so without a physics space is not supported when using Jolt Physics. If this relates to a node, try adding the node to a scene tree first.", to_string()));
 

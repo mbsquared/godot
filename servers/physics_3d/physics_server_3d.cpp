@@ -850,6 +850,18 @@ void PhysicsServer3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_set_apply_gyroscopic_force", "body", "enable"), &PhysicsServer3D::body_set_apply_gyroscopic_force);
 	ClassDB::bind_method(D_METHOD("body_is_applying_gyroscopic_force", "body"), &PhysicsServer3D::body_is_applying_gyroscopic_force);
 	ClassDB::bind_method(D_METHOD("shapes_get_volume_properties", "shapes"), &PhysicsServer3D::shapes_get_volume_properties);
+	// CRUMB: the contact-force read, and the soft-surface signatures.
+	ClassDB::bind_method(D_METHOD("body_set_contact_force_tracking", "body", "enable"), &PhysicsServer3D::body_set_contact_force_tracking);
+	ClassDB::bind_method(D_METHOD("body_get_contact_force", "body", "first_shape", "shape_count"), &PhysicsServer3D::body_get_contact_force);
+	ClassDB::bind_method(D_METHOD("body_get_contact_torque", "body", "first_shape", "shape_count"), &PhysicsServer3D::body_get_contact_torque);
+	ClassDB::bind_method(D_METHOD("body_get_contact_normal_force", "body", "first_shape", "shape_count"), &PhysicsServer3D::body_get_contact_normal_force);
+	ClassDB::bind_method(D_METHOD("body_get_contact_point", "body", "first_shape", "shape_count"), &PhysicsServer3D::body_get_contact_point);
+	ClassDB::bind_method(D_METHOD("body_get_contact_area", "body", "first_shape", "shape_count"), &PhysicsServer3D::body_get_contact_area);
+	ClassDB::bind_method(D_METHOD("body_get_contact_friction_use", "body", "first_shape", "shape_count"), &PhysicsServer3D::body_get_contact_friction_use);
+	ClassDB::bind_method(D_METHOD("soft_surfaces_available"), &PhysicsServer3D::soft_surfaces_available);
+	ClassDB::bind_method(D_METHOD("body_set_shape_soft_surface", "body", "shape_idx", "params"), &PhysicsServer3D::body_set_shape_soft_surface);
+	ClassDB::bind_method(D_METHOD("space_get_soft_contact_stats", "space"), &PhysicsServer3D::space_get_soft_contact_stats);
+	ClassDB::bind_method(D_METHOD("space_debug_soft_patch", "space", "body_a", "shape_a", "body_b", "shape_b"), &PhysicsServer3D::space_debug_soft_patch);
 
 	ClassDB::bind_method(D_METHOD("body_set_state", "body", "state", "value"), &PhysicsServer3D::body_set_state);
 	ClassDB::bind_method(D_METHOD("body_get_state", "body", "state"), &PhysicsServer3D::body_get_state);

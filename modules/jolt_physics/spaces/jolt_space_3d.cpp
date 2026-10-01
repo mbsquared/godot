@@ -48,6 +48,7 @@
 #include "core/io/file_access.h"
 #include "core/os/time.h"
 #include "core/string/print_string.h"
+#include "core/templates/safe_refcount.h"
 #include "core/variant/variant_utility.h"
 
 #include "Jolt/Physics/Collision/CollideShapeVsShapePerLeaf.h"
@@ -79,7 +80,16 @@ void crumb_contact_surface(const JPH::Body &p_body, const JPH::SubShapeID &p_sub
 
 } // namespace
 
+namespace {
+
+// CRUMB: step serials for every space (see JoltSpace3D::step_serial).
+SafeNumeric<uint64_t> crumb_step_serials;
+
+} // namespace
+
 void JoltSpace3D::_pre_step(float p_step) {
+	step_serial = crumb_step_serials.increment();
+
 	flush_pending_objects();
 
 	while (needs_optimization_list.first()) {

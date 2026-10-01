@@ -43,6 +43,7 @@
 void JoltContactListener3D::OnContactAdded(const JPH::Body &p_body1, const JPH::Body &p_body2, const JPH::ContactManifold &p_manifold, JPH::ContactSettings &p_settings) {
 	_try_override_collision_response(p_body1, p_body2, p_settings);
 	_try_apply_surface_velocities(p_body1, p_body2, p_settings);
+	_try_request_solved_report(p_body1, p_body2, p_settings);
 	_try_add_contacts(p_body1, p_body2, p_manifold, p_settings);
 	_try_evaluate_area_overlap(p_body1, p_body2, p_manifold);
 
@@ -54,6 +55,7 @@ void JoltContactListener3D::OnContactAdded(const JPH::Body &p_body1, const JPH::
 void JoltContactListener3D::OnContactPersisted(const JPH::Body &p_body1, const JPH::Body &p_body2, const JPH::ContactManifold &p_manifold, JPH::ContactSettings &p_settings) {
 	_try_override_collision_response(p_body1, p_body2, p_settings);
 	_try_apply_surface_velocities(p_body1, p_body2, p_settings);
+	_try_request_solved_report(p_body1, p_body2, p_settings);
 	_try_add_contacts(p_body1, p_body2, p_manifold, p_settings);
 	_try_evaluate_area_overlap(p_body1, p_body2, p_manifold);
 
@@ -69,6 +71,49 @@ void JoltContactListener3D::OnContactRemoved(const JPH::SubShapeIDPair &p_shape_
 
 	if (_try_remove_area_overlap(p_shape_pair)) {
 		return;
+	}
+}
+
+// CRUMB: what the solver applied to a manifold one of whose bodies tracks its contact forces. Body 2
+// takes the report and body 1 its opposite, each on the shape the manifold is on, with the moment
+// carried from the report's centre to that body's centre of mass. The bodies have not moved since the
+// solve. A dynamic body that a one-sided collision left unpushed (its inverse mass scaled to zero in
+// _try_override_collision_response) took nothing, so it is given nothing.
+void JoltContactListener3D::OnContactSolved(const JPH::Body &p_jolt_body1, const JPH::Body &p_jolt_body2, const JPH::SubShapeIDPair &p_shape_pair, const JPH::ContactSolvedReport &p_report) {
+	JoltBody3D *body1 = reinterpret_cast<JoltBody3D *>(p_jolt_body1.GetUserData());
+	JoltBody3D *body2 = reinterpret_cast<JoltBody3D *>(p_jolt_body2.GetUserData());
+
+	bool takes1 = body1->is_tracking_contact_forces();
+	bool takes2 = body2->is_tracking_contact_forces();
+	if (!takes1 && !takes2) {
+		return;
+	}
+
+	if (p_jolt_body1.IsDynamic() || p_jolt_body2.IsDynamic()) {
+		const bool can_collide1 = body1->can_collide_with(*body2);
+		const bool can_collide2 = body2->can_collide_with(*body1);
+		if (can_collide1 && !can_collide2) {
+			takes2 = takes2 && !p_jolt_body2.IsDynamic();
+		} else if (can_collide2 && !can_collide1) {
+			takes1 = takes1 && !p_jolt_body1.IsDynamic();
+		}
+	}
+
+	const uint64_t serial = space->get_step_serial();
+	const Vector3 centre = to_godot(p_report.mCentre);
+	const Vector3 impulse = to_godot(p_report.mLinearImpulse);
+	const Vector3 moment = to_godot(p_report.mAngularImpulse);
+
+	const MutexLock write_lock(write_mutex);
+
+	if (takes2) {
+		const Vector3 arm = centre - to_godot(p_jolt_body2.GetCenterOfMassPosition());
+		body2->add_solved_contact(p_jolt_body2, p_shape_pair.GetSubShapeID2(), serial, impulse, moment + arm.cross(impulse), p_report.mNormalImpulse, centre, p_report.mArea, p_report.mFrictionUse);
+	}
+
+	if (takes1) {
+		const Vector3 arm = centre - to_godot(p_jolt_body1.GetCenterOfMassPosition());
+		body1->add_solved_contact(p_jolt_body1, p_shape_pair.GetSubShapeID1(), serial, -impulse, -moment - arm.cross(impulse), p_report.mNormalImpulse, centre, p_report.mArea, p_report.mFrictionUse);
 	}
 }
 
@@ -171,6 +216,24 @@ bool JoltContactListener3D::_try_apply_surface_velocities(const JPH::Body &p_jol
 	p_settings.mRelativeLinearSurfaceVelocity = total_linear_velocity2 - linear_velocity1;
 	p_settings.mRelativeAngularSurfaceVelocity = angular_velocity2 - angular_velocity1;
 
+	return true;
+}
+
+// CRUMB: ask the solver to report what it applied to this manifold when either body tracks its
+// contact forces. Nothing else changes: the manifold, its reduction and the solve are as they were.
+bool JoltContactListener3D::_try_request_solved_report(const JPH::Body &p_jolt_body1, const JPH::Body &p_jolt_body2, JPH::ContactSettings &p_settings) {
+	if (p_jolt_body1.IsSensor() || p_jolt_body2.IsSensor()) {
+		return false;
+	}
+
+	const JoltBody3D *body1 = reinterpret_cast<JoltBody3D *>(p_jolt_body1.GetUserData());
+	const JoltBody3D *body2 = reinterpret_cast<JoltBody3D *>(p_jolt_body2.GetUserData());
+
+	if (!body1->is_tracking_contact_forces() && !body2->is_tracking_contact_forces()) {
+		return false;
+	}
+
+	p_settings.mReportSolved = true;
 	return true;
 }
 
