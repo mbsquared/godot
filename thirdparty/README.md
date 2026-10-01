@@ -511,6 +511,7 @@ Patches:
 - `0006-backport-upstream-commit-365a15367.patch` ([GH-115305](https://github.com/godotengine/godot/pull/115305))
 - `0007-backport-upstream-commit-e0a6a9a16.patch` ([GH-115327](https://github.com/godotengine/godot/pull/115327))
 - `0008-crumb-six-dof-world-space-impulses.patch` (CRUMB fork: a 6DOF constraint's last impulses as world vectors, for joint reactions)
+- `0011-crumb-gear-ratio-on-body-two.patch` (CRUMB fork: the gear constraint applies its ratio to body 2's impulse, so a geared pair multiplies torque and conserves momentum; 0009 and 0010 are reserved for the contact patches)
 
 
 ## libbacktrace
