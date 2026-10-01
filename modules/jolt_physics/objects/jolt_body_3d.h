@@ -104,6 +104,22 @@ private:
 	bool custom_center_of_mass = false;
 	bool custom_integrator = false;
 
+	// CRUMB: a full inertia tensor about the centre of mass in body axes, replacing the shape's
+	// figures when set (see PhysicsServer3D::body_set_inertia_tensor).
+	Basis inertia_tensor = Basis(Vector3(), Vector3(), Vector3());
+	bool has_inertia_tensor = false;
+
+	// CRUMB: 0 the module's own rule (reduce unless reporting contacts), 1 always, 2 never.
+	int manifold_reduction_mode = 0;
+
+	// CRUMB: the gyroscopic term, off unless asked for.
+	bool apply_gyroscopic_force = false;
+
+	// CRUMB: at least one shape carries its own friction and bounce.
+	bool shape_surfaces = false;
+
+	bool _uses_manifold_reduction() const;
+
 	virtual JPH::BroadPhaseLayer _get_broad_phase_layer() const override;
 	virtual JPH::ObjectLayer _get_object_layer() const override;
 
@@ -269,6 +285,21 @@ public:
 
 	Vector3 get_inertia() const { return inertia; }
 	void set_inertia(const Vector3 &p_inertia);
+
+	Basis get_inertia_tensor() const { return inertia_tensor; }
+	void set_inertia_tensor(const Basis &p_inertia);
+
+	int get_manifold_reduction_mode() const { return manifold_reduction_mode; }
+	void set_manifold_reduction_mode(int p_mode);
+
+	bool is_applying_gyroscopic_force() const { return apply_gyroscopic_force; }
+	void set_apply_gyroscopic_force(bool p_enable);
+
+	bool has_shape_surfaces() const { return shape_surfaces; }
+	void set_shape_surface(int p_index, float p_friction, float p_bounce);
+	// The friction and bounce of the shape a contact is on: its own when set, else the body's. Read
+	// only, from the space's combine callbacks during the step.
+	void get_contact_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id, float &r_friction, float &r_bounce) const;
 
 	float get_bounce() const;
 	void set_bounce(float p_bounce);

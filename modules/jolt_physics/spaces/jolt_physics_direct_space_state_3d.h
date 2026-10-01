@@ -61,6 +61,8 @@ class JoltPhysicsDirectSpaceState3D final : public PhysicsDirectSpaceState3D {
 
 	int _try_get_face_index(const JPH::Body &p_body, const JPH::SubShapeID &p_sub_shape_id);
 
+	bool _intersect_ray(const RayParameters &p_parameters, const JPH::ShapeFilter &p_shape_filter, RayResult &r_result);
+
 	void _generate_manifold(const JPH::CollideShapeResult &p_hit, JPH::ContactPoints &r_contact_points1, JPH::ContactPoints &r_contact_points2 JPH_IF_DEBUG_RENDERER(, JPH::RVec3Arg p_center_of_mass)) const;
 
 	void _collide_shape_queries(const JPH::Shape *p_shape, JPH::Vec3Arg p_scale, JPH::RMat44Arg p_transform_com, const JPH::CollideShapeSettings &p_settings, JPH::RVec3Arg p_base_offset, JPH::CollideShapeCollector &p_collector, const JPH::BroadPhaseLayerFilter &p_broad_phase_layer_filter = JPH::BroadPhaseLayerFilter(), const JPH::ObjectLayerFilter &p_object_layer_filter = JPH::ObjectLayerFilter(), const JPH::BodyFilter &p_body_filter = JPH::BodyFilter(), const JPH::ShapeFilter &p_shape_filter = JPH::ShapeFilter()) const;
@@ -71,6 +73,7 @@ public:
 	explicit JoltPhysicsDirectSpaceState3D(JoltSpace3D *p_space);
 
 	virtual bool intersect_ray(const RayParameters &p_parameters, RayResult &r_result) override;
+	virtual bool intersect_ray_filtered(const RayParameters &p_parameters, const RID &p_own_body, int p_own_first, int p_own_count, RayResult &r_result) override;
 	virtual int intersect_point(const PointParameters &p_parameters, ShapeResult *r_results, int p_result_max) override;
 	virtual int intersect_shape(const ShapeParameters &p_parameters, ShapeResult *r_results, int p_result_max) override;
 	virtual bool cast_motion(const ShapeParameters &p_parameters, real_t &r_closest_safe, real_t &r_closest_unsafe, ShapeRestInfo *r_info = nullptr) override;

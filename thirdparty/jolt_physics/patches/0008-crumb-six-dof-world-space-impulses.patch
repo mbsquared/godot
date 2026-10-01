@@ -1,0 +1,95 @@
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.h b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.h
+index c2a47547f5..f0b3053ee6 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ConstraintPart/SwingTwistConstraintPart.h
+@@ -527,6 +527,21 @@ public:
+ 		return mTwistLimitConstraintPart.GetTotalLambda();
+ 	}
+ 
++	// CRUMB: the angular impulse the swing and twist limits applied to body 2 in the last velocity
++	// solve, in world space: each active part pushes along the world axis it was set up on this step.
++	// An inactive part is skipped, never multiplied by zero, because its stored axis may be stale.
++	inline Vec3					GetTotalLambdaWS() const
++	{
++		Vec3 impulse = Vec3::sZero();
++		if (mSwingLimitYConstraintPart.IsActive())
++			impulse += mSwingLimitYConstraintPart.GetTotalLambda() * mWorldSpaceSwingLimitYRotationAxis;
++		if (mSwingLimitZConstraintPart.IsActive())
++			impulse += mSwingLimitZConstraintPart.GetTotalLambda() * mWorldSpaceSwingLimitZRotationAxis;
++		if (mTwistLimitConstraintPart.IsActive())
++			impulse += mTwistLimitConstraintPart.GetTotalLambda() * mWorldSpaceTwistLimitRotationAxis;
++		return impulse;
++	}
++
+ 	/// Save state of this constraint part
+ 	void						SaveState(StateRecorder &inStream) const
+ 	{
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/SixDOFConstraint.cpp b/thirdparty/jolt_physics/Jolt/Physics/Constraints/SixDOFConstraint.cpp
+index 6ec73d6893..e8b00b9410 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/SixDOFConstraint.cpp
++++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/SixDOFConstraint.cpp
+@@ -573,6 +573,47 @@ void SixDOFConstraint::SetupVelocityConstraint(float inDeltaTime)
+ 	}
+ }
+ 
++// CRUMB: the impulses of the last velocity solve as world vectors on body 2. The gating mirrors
++// SolveVelocityConstraint, so a part is counted exactly when the solve used it, along the axis it
++// was set up on in SetupVelocityConstraint.
++Vec3 SixDOFConstraint::GetTotalImpulseLinearWS() const
++{
++	Vec3 impulse = Vec3::sZero();
++	if (IsTranslationFullyConstrained())
++	{
++		if (mPointConstraintPart.IsActive())
++			impulse += mPointConstraintPart.GetTotalLambda();
++	}
++	else if (IsTranslationConstrained())
++	{
++		for (int i = 0; i < 3; ++i)
++			if (mTranslationConstraintPart[i].IsActive())
++				impulse += mTranslationConstraintPart[i].GetTotalLambda() * mTranslationAxis[i];
++	}
++	if (mTranslationMotorActive)
++		for (int i = 0; i < 3; ++i)
++			if (mMotorTranslationConstraintPart[i].IsActive())
++				impulse += mMotorTranslationConstraintPart[i].GetTotalLambda() * mTranslationAxis[i];
++	return impulse;
++}
++
++Vec3 SixDOFConstraint::GetTotalImpulseAngularWS() const
++{
++	Vec3 impulse = Vec3::sZero();
++	if (IsRotationFullyConstrained())
++	{
++		if (mRotationConstraintPart.IsActive())
++			impulse += mRotationConstraintPart.GetTotalLambda();
++	}
++	else if (IsRotationConstrained())
++		impulse += mSwingTwistConstraintPart.GetTotalLambdaWS();
++	if (mRotationMotorActive)
++		for (int i = 0; i < 3; ++i)
++			if (mMotorRotationConstraintPart[i].IsActive())
++				impulse += mMotorRotationConstraintPart[i].GetTotalLambda() * mRotationAxis[i];
++	return impulse;
++}
++
+ void SixDOFConstraint::ResetWarmStart()
+ {
+ 	for (AxisConstraintPart &c : mMotorTranslationConstraintPart)
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/SixDOFConstraint.h b/thirdparty/jolt_physics/Jolt/Physics/Constraints/SixDOFConstraint.h
+index 2ebb9856bd..c0c4540593 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/SixDOFConstraint.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/SixDOFConstraint.h
+@@ -198,6 +198,12 @@ public:
+ 	inline Vec3					GetTotalLambdaMotorTranslation() const						{ return Vec3(mMotorTranslationConstraintPart[0].GetTotalLambda(), mMotorTranslationConstraintPart[1].GetTotalLambda(), mMotorTranslationConstraintPart[2].GetTotalLambda()); }
+ 	inline Vec3					GetTotalLambdaMotorRotation() const							{ return Vec3(mMotorRotationConstraintPart[0].GetTotalLambda(), mMotorRotationConstraintPart[1].GetTotalLambda(), mMotorRotationConstraintPart[2].GetTotalLambda()); }
+ 
++	// CRUMB: the impulse this constraint applied to body 2 in its last velocity solve, in world space:
++	// the linear one at the constraint's position, the angular one a pure moment. Body 1 received the
++	// negation of each. Only the parts the solve used are counted, on the axes it used.
++	Vec3						GetTotalImpulseLinearWS() const;
++	Vec3						GetTotalImpulseAngularWS() const;
++
+ private:
+ 	// Calculate properties needed for the position constraint
+ 	inline void					GetPositionConstraintProperties(Vec3 &outR1PlusU, Vec3 &outR2, Vec3 &outU) const;

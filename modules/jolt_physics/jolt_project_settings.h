@@ -37,6 +37,23 @@ enum JoltJointWorldNode : int {
 	JOLT_JOINT_WORLD_NODE_B,
 };
 
+// CRUMB: how the two sides of a contact combine their friction and their bounce. The first value of
+// each is the module's own rule, the default.
+enum JoltFrictionCombine : int {
+	JOLT_FRICTION_COMBINE_MIN,
+	JOLT_FRICTION_COMBINE_MAX,
+	JOLT_FRICTION_COMBINE_AVERAGE,
+	JOLT_FRICTION_COMBINE_GEOMETRIC_MEAN,
+};
+
+enum JoltRestitutionCombine : int {
+	JOLT_RESTITUTION_COMBINE_SUM,
+	JOLT_RESTITUTION_COMBINE_MAX,
+	JOLT_RESTITUTION_COMBINE_MIN,
+	JOLT_RESTITUTION_COMBINE_AVERAGE,
+	JOLT_RESTITUTION_COMBINE_MULTIPLY,
+};
+
 class JoltProjectSettings {
 public:
 	inline static int simulation_velocity_steps;
@@ -70,6 +87,9 @@ public:
 	inline static float active_edge_threshold_cos;
 
 	inline static JoltJointWorldNode joint_world_node;
+
+	inline static JoltFrictionCombine friction_combine = JOLT_FRICTION_COMBINE_MIN;
+	inline static JoltRestitutionCombine restitution_combine = JOLT_RESTITUTION_COMBINE_SUM;
 
 	inline static int temp_memory_mib;
 	inline static int64_t temp_memory_b;

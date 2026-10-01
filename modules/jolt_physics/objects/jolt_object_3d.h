@@ -75,6 +75,11 @@ protected:
 
 	bool pickable = false;
 
+	// CRUMB: the order objects were created in, process wide. A space rebuilt in place re-enters its
+	// objects in this order, which is the order a space that never held anything else would have
+	// given them their ids in.
+	uint64_t creation_serial = 0;
+
 	virtual JPH::BroadPhaseLayer _get_broad_phase_layer() const = 0;
 	virtual JPH::ObjectLayer _get_object_layer() const = 0;
 
@@ -126,6 +131,12 @@ public:
 
 	JoltSpace3D *get_space() const { return space; }
 	void set_space(JoltSpace3D *p_space);
+
+	// CRUMB: the two halves of a re-entry into the same space, for JoltSpace3D::rebuild: leave the
+	// old world (settings recaptured from the live body), then enter the new one.
+	uint64_t get_creation_serial() const { return creation_serial; }
+	void leave_space_for_rebuild();
+	void enter_space_after_rebuild();
 	bool in_space() const { return space != nullptr && jolt_body != nullptr; }
 
 	uint32_t get_collision_layer() const { return collision_layer; }

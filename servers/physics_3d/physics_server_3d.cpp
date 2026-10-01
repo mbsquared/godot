@@ -382,6 +382,40 @@ Dictionary PhysicsDirectSpaceState3D::_intersect_ray(RequiredParam<PhysicsRayQue
 	return d;
 }
 
+thread_local PhysicsDirectSpaceState3D::RayResult PhysicsDirectSpaceState3D::crumb_last_ray;
+
+bool PhysicsDirectSpaceState3D::intersect_ray_filtered(const RayParameters &p_parameters, const RID &p_own_body, int p_own_first, int p_own_count, RayResult &r_result) {
+	return intersect_ray(p_parameters, r_result);
+}
+
+bool PhysicsDirectSpaceState3D::_intersect_ray_hit(RequiredParam<PhysicsRayQueryParameters3D> rp_ray_query, const RID &p_own_body, int p_own_first, int p_own_count) {
+	EXTRACT_PARAM_OR_FAIL_V(p_ray_query, rp_ray_query, false);
+
+	RayResult &result = crumb_last_ray;
+	result = RayResult();
+
+	if (p_own_body.is_valid() && p_own_count > 0) {
+		return intersect_ray_filtered(p_ray_query->get_parameters(), p_own_body, p_own_first, p_own_count, result);
+	}
+	return intersect_ray(p_ray_query->get_parameters(), result);
+}
+
+Vector3 PhysicsDirectSpaceState3D::_get_last_ray_position() const {
+	return crumb_last_ray.position;
+}
+
+Vector3 PhysicsDirectSpaceState3D::_get_last_ray_normal() const {
+	return crumb_last_ray.normal;
+}
+
+RID PhysicsDirectSpaceState3D::_get_last_ray_rid() const {
+	return crumb_last_ray.rid;
+}
+
+int PhysicsDirectSpaceState3D::_get_last_ray_shape() const {
+	return crumb_last_ray.shape;
+}
+
 TypedArray<Dictionary> PhysicsDirectSpaceState3D::_intersect_point(RequiredParam<PhysicsPointQueryParameters3D> rp_point_query, int p_max_results) {
 	EXTRACT_PARAM_OR_FAIL_V(p_point_query, rp_point_query, TypedArray<Dictionary>());
 
@@ -487,6 +521,12 @@ PhysicsDirectSpaceState3D::PhysicsDirectSpaceState3D() {
 void PhysicsDirectSpaceState3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("intersect_point", "parameters", "max_results"), &PhysicsDirectSpaceState3D::_intersect_point, DEFVAL(32));
 	ClassDB::bind_method(D_METHOD("intersect_ray", "parameters"), &PhysicsDirectSpaceState3D::_intersect_ray);
+	// CRUMB: the allocation-free ray and its per-thread read-back.
+	ClassDB::bind_method(D_METHOD("intersect_ray_hit", "parameters", "own_body", "own_first", "own_count"), &PhysicsDirectSpaceState3D::_intersect_ray_hit, DEFVAL(RID()), DEFVAL(0), DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("get_last_ray_position"), &PhysicsDirectSpaceState3D::_get_last_ray_position);
+	ClassDB::bind_method(D_METHOD("get_last_ray_normal"), &PhysicsDirectSpaceState3D::_get_last_ray_normal);
+	ClassDB::bind_method(D_METHOD("get_last_ray_rid"), &PhysicsDirectSpaceState3D::_get_last_ray_rid);
+	ClassDB::bind_method(D_METHOD("get_last_ray_shape"), &PhysicsDirectSpaceState3D::_get_last_ray_shape);
 	ClassDB::bind_method(D_METHOD("intersect_shape", "parameters", "max_results"), &PhysicsDirectSpaceState3D::_intersect_shape, DEFVAL(32));
 	ClassDB::bind_method(D_METHOD("cast_motion", "parameters"), &PhysicsDirectSpaceState3D::_cast_motion);
 	ClassDB::bind_method(D_METHOD("collide_shape", "parameters", "max_results"), &PhysicsDirectSpaceState3D::_collide_shape, DEFVAL(32));
@@ -721,6 +761,9 @@ void PhysicsServer3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("space_set_param", "space", "param", "value"), &PhysicsServer3D::space_set_param);
 	ClassDB::bind_method(D_METHOD("space_get_param", "space", "param"), &PhysicsServer3D::space_get_param);
 	ClassDB::bind_method(D_METHOD("space_get_direct_state", "space"), &PhysicsServer3D::space_get_direct_state);
+	// CRUMB: rebuild a space's world in place, and its ids.
+	ClassDB::bind_method(D_METHOD("space_rebuild", "space"), &PhysicsServer3D::space_rebuild);
+	ClassDB::bind_method(D_METHOD("space_get_body_ids", "space"), &PhysicsServer3D::space_get_body_ids);
 
 	ClassDB::bind_method(D_METHOD("area_create"), &PhysicsServer3D::area_create);
 	ClassDB::bind_method(D_METHOD("area_set_space", "area", "space"), &PhysicsServer3D::area_set_space);
@@ -798,6 +841,15 @@ void PhysicsServer3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_get_param", "body", "param"), &PhysicsServer3D::body_get_param);
 
 	ClassDB::bind_method(D_METHOD("body_reset_mass_properties", "body"), &PhysicsServer3D::body_reset_mass_properties);
+	// CRUMB: welded bodies, contact detail, per-shape surfaces, the gyroscopic term, shape volumes.
+	ClassDB::bind_method(D_METHOD("body_set_inertia_tensor", "body", "inertia"), &PhysicsServer3D::body_set_inertia_tensor);
+	ClassDB::bind_method(D_METHOD("body_get_inertia_tensor", "body"), &PhysicsServer3D::body_get_inertia_tensor);
+	ClassDB::bind_method(D_METHOD("body_set_manifold_reduction", "body", "mode"), &PhysicsServer3D::body_set_manifold_reduction);
+	ClassDB::bind_method(D_METHOD("body_get_manifold_reduction", "body"), &PhysicsServer3D::body_get_manifold_reduction);
+	ClassDB::bind_method(D_METHOD("body_set_shape_surface", "body", "shape_idx", "friction", "bounce"), &PhysicsServer3D::body_set_shape_surface);
+	ClassDB::bind_method(D_METHOD("body_set_apply_gyroscopic_force", "body", "enable"), &PhysicsServer3D::body_set_apply_gyroscopic_force);
+	ClassDB::bind_method(D_METHOD("body_is_applying_gyroscopic_force", "body"), &PhysicsServer3D::body_is_applying_gyroscopic_force);
+	ClassDB::bind_method(D_METHOD("shapes_get_volume_properties", "shapes"), &PhysicsServer3D::shapes_get_volume_properties);
 
 	ClassDB::bind_method(D_METHOD("body_set_state", "body", "state", "value"), &PhysicsServer3D::body_set_state);
 	ClassDB::bind_method(D_METHOD("body_get_state", "body", "state"), &PhysicsServer3D::body_get_state);
@@ -949,6 +1001,7 @@ void PhysicsServer3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("joint_make_hinge", "joint", "body_A", "hinge_A", "body_B", "hinge_B"), &PhysicsServer3D::joint_make_hinge);
 
 	ClassDB::bind_method(D_METHOD("gear_joint_create", "body_a", "axis_a", "body_b", "axis_b", "ratio"), &PhysicsServer3D::gear_joint_create);
+	ClassDB::bind_method(D_METHOD("velocity_gear_joint_create", "body_a", "axis_a", "body_b", "axis_b", "body_c", "axis_c", "coefficients"), &PhysicsServer3D::velocity_gear_joint_create);
 
 	// CRUMB free-running physics thread.
 	ClassDB::bind_method(D_METHOD("is_free_running"), &PhysicsServer3D::is_free_running);
@@ -1065,6 +1118,9 @@ void PhysicsServer3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("generic_6dof_joint_set_flag", "joint", "axis", "flag", "enable"), &PhysicsServer3D::generic_6dof_joint_set_flag);
 	ClassDB::bind_method(D_METHOD("generic_6dof_joint_get_flag", "joint", "axis", "flag"), &PhysicsServer3D::generic_6dof_joint_get_flag);
+	// CRUMB: joint reactions as world vectors.
+	ClassDB::bind_method(D_METHOD("generic_6dof_joint_get_reaction_force", "joint"), &PhysicsServer3D::generic_6dof_joint_get_reaction_force);
+	ClassDB::bind_method(D_METHOD("generic_6dof_joint_get_reaction_torque", "joint"), &PhysicsServer3D::generic_6dof_joint_get_reaction_torque);
 
 	ClassDB::bind_method(D_METHOD("free_rid", "rid"), &PhysicsServer3D::free_rid);
 

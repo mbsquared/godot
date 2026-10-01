@@ -34,6 +34,7 @@
 #include "core/object/worker_thread_pool.h"
 #include "core/os/thread.h"
 #include "core/templates/command_queue_mt.h"
+#include "core/variant/typed_array.h"
 #include "servers/physics_3d/physics_server_3d.h"
 
 #define ASYNC_COND_PUSH (Thread::get_caller_id() != server_thread)
@@ -177,6 +178,10 @@ public:
 		return physics_server_3d->space_get_direct_state(p_space);
 	}
 
+	// CRUMB: synchronous, so the bake knows at once whether its space was rebuilt.
+	FUNC1R(bool, space_rebuild, RID);
+	FUNC1RC(PackedInt64Array, space_get_body_ids, RID);
+
 	FUNC2(space_set_debug_contacts, RID, int);
 	virtual Vector<Vector3> space_get_contacts(RID p_space) const override {
 		ERR_FAIL_COND_V(!Thread::is_main_thread(), Vector<Vector3>());
@@ -274,6 +279,16 @@ public:
 	FUNC2RC(Variant, body_get_param, RID, BodyParameter);
 
 	FUNC1(body_reset_mass_properties, RID);
+
+	// CRUMB: welded bodies, contact detail, per-shape surfaces, the gyroscopic term, shape volumes.
+	FUNC2(body_set_inertia_tensor, RID, const Basis &);
+	FUNC1RC(Basis, body_get_inertia_tensor, RID);
+	FUNC2(body_set_manifold_reduction, RID, int);
+	FUNC1RC(int, body_get_manifold_reduction, RID);
+	FUNC4(body_set_shape_surface, RID, int, real_t, real_t);
+	FUNC2(body_set_apply_gyroscopic_force, RID, bool);
+	FUNC1RC(bool, body_is_applying_gyroscopic_force, RID);
+	FUNC1RC(PackedFloat64Array, shapes_get_volume_properties, const TypedArray<RID> &);
 
 	FUNC3(body_set_state, RID, BodyState, const Variant &);
 	FUNC2RC(Variant, body_get_state, RID, BodyState);
@@ -399,6 +414,7 @@ public:
 
 	// Synchronous (push_and_ret): the caller needs the minted RID immediately, same as the FUNCRID creators.
 	FUNC5R(RID, gear_joint_create, RID, const Vector3 &, RID, const Vector3 &, double)
+	FUNC7R(RID, velocity_gear_joint_create, RID, const Vector3 &, RID, const Vector3 &, RID, const Vector3 &, const Vector3 &)
 
 	FUNC1(joint_clear, RID)
 
@@ -439,6 +455,9 @@ public:
 
 	FUNC4(generic_6dof_joint_set_flag, RID, Vector3::Axis, G6DOFJointAxisFlag, bool)
 	FUNC3RC(bool, generic_6dof_joint_get_flag, RID, Vector3::Axis, G6DOFJointAxisFlag)
+
+	FUNC1RC(Vector3, generic_6dof_joint_get_reaction_force, RID)
+	FUNC1RC(Vector3, generic_6dof_joint_get_reaction_torque, RID)
 
 	FUNC1RC(JointType, joint_get_type, RID);
 

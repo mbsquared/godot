@@ -84,11 +84,22 @@ class JoltSpace3D {
 	void _pre_step(float p_step);
 	void _post_step(float p_step);
 
+	// CRUMB: everything a fresh physics world needs (settings, gravity, listeners, the collide and
+	// combine callbacks), shared by the constructor and rebuild.
+	void _init_physics_system();
+
 public:
 	explicit JoltSpace3D(JPH::JobSystem *p_job_system);
 	~JoltSpace3D();
 
 	void step(float p_step);
+
+	// CRUMB: rebuild this space's physics world in place. p_objects are every object in the space,
+	// in creation order: they leave the old world in reverse order and enter a fresh one in order,
+	// so ids, broad phase and contact caches are those of a space that never held anything else.
+	// The space's active flag is untouched. Refused (false, logged) while stepping, with any
+	// constraint, or with a soft body.
+	bool rebuild(const LocalVector<JoltObject3D *> &p_objects);
 
 	void call_queries();
 

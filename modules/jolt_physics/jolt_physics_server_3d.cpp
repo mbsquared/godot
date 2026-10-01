@@ -37,6 +37,7 @@
 #include "joints/jolt_joint_3d.h"
 #include "joints/jolt_pin_joint_3d.h"
 #include "joints/jolt_slider_joint_3d.h"
+#include "joints/jolt_velocity_gear_joint_3d.h"
 #include "objects/jolt_area_3d.h"
 #include "objects/jolt_body_3d.h"
 #include "objects/jolt_soft_body_3d.h"
@@ -53,6 +54,45 @@
 #include "spaces/jolt_job_system.h"
 #include "spaces/jolt_physics_direct_space_state_3d.h"
 #include "spaces/jolt_space_3d.h"
+
+#include "Jolt/Physics/Collision/Shape/ConvexShape.h"
+
+namespace {
+
+struct CrumbCreationOrder {
+	bool operator()(const JoltObject3D *p_a, const JoltObject3D *p_b) const { return p_a->get_creation_serial() < p_b->get_creation_serial(); }
+};
+
+} // namespace
+
+// CRUMB: every object whose space is p_space (bodies, areas including the default one, soft
+// bodies), in creation order.
+void JoltPhysicsServer3D::_get_space_objects(const JoltSpace3D *p_space, LocalVector<JoltObject3D *> &r_objects) const {
+	r_objects.clear();
+
+	for (const RID &rid : body_owner.get_owned_list()) {
+		JoltBody3D *body = body_owner.get_or_null(rid);
+		if (body != nullptr && body->get_space() == p_space) {
+			r_objects.push_back(body);
+		}
+	}
+
+	for (const RID &rid : area_owner.get_owned_list()) {
+		JoltArea3D *area = area_owner.get_or_null(rid);
+		if (area != nullptr && area->get_space() == p_space) {
+			r_objects.push_back(area);
+		}
+	}
+
+	for (const RID &rid : soft_body_owner.get_owned_list()) {
+		JoltSoftBody3D *soft_body = soft_body_owner.get_or_null(rid);
+		if (soft_body != nullptr && soft_body->get_space() == p_space) {
+			r_objects.push_back(soft_body);
+		}
+	}
+
+	r_objects.sort_custom<CrumbCreationOrder>();
+}
 
 JoltPhysicsServer3D::JoltPhysicsServer3D(bool p_on_separate_thread) :
 		on_separate_thread(p_on_separate_thread) {
@@ -235,6 +275,37 @@ PhysicsDirectSpaceState3D *JoltPhysicsServer3D::space_get_direct_state(RID p_spa
 	ERR_FAIL_COND_V_MSG((on_separate_thread && !doing_sync) || space->is_stepping(), nullptr, "Space state is inaccessible right now, wait for iteration or physics process notification.");
 
 	return space->get_direct_state();
+}
+
+bool JoltPhysicsServer3D::space_rebuild(RID p_space) {
+	JoltSpace3D *space = space_owner.get_or_null(p_space);
+	ERR_FAIL_NULL_V(space, false);
+
+	LocalVector<JoltObject3D *> objects;
+	_get_space_objects(space, objects);
+
+	return space->rebuild(objects);
+}
+
+PackedInt64Array JoltPhysicsServer3D::space_get_body_ids(RID p_space) const {
+	const JoltSpace3D *space = space_owner.get_or_null(p_space);
+	ERR_FAIL_NULL_V(space, PackedInt64Array());
+
+	LocalVector<JoltObject3D *> objects;
+	_get_space_objects(space, objects);
+
+	PackedInt64Array ids;
+	ids.resize((int64_t)objects.size());
+	int64_t *w = ids.ptrw();
+	for (uint32_t i = 0; i < objects.size(); ++i) {
+		const JoltObject3D *object = objects[i];
+		const uint64_t serial = object->get_creation_serial() & 0xFFFFFFFFull;
+		const JPH::Body *jolt_body = object->get_jolt_body();
+		const uint64_t id = jolt_body != nullptr ? (uint64_t)jolt_body->GetID().GetIndexAndSequenceNumber() : 0xFFFFFFFFull;
+		w[i] = (int64_t)((serial << 32) | id);
+	}
+
+	return ids;
 }
 
 void JoltPhysicsServer3D::space_set_debug_contacts(RID p_space, int p_max_contacts) {
@@ -748,6 +819,113 @@ void JoltPhysicsServer3D::body_reset_mass_properties(RID p_body) {
 	ERR_FAIL_NULL(body);
 
 	body->reset_mass_properties();
+}
+
+void JoltPhysicsServer3D::body_set_inertia_tensor(RID p_body, const Basis &p_inertia) {
+	JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+
+	body->set_inertia_tensor(p_inertia);
+}
+
+Basis JoltPhysicsServer3D::body_get_inertia_tensor(RID p_body) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, Basis(Vector3(), Vector3(), Vector3()));
+
+	return body->get_inertia_tensor();
+}
+
+void JoltPhysicsServer3D::body_set_manifold_reduction(RID p_body, int p_mode) {
+	JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+
+	body->set_manifold_reduction_mode(p_mode);
+}
+
+int JoltPhysicsServer3D::body_get_manifold_reduction(RID p_body) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, 0);
+
+	return body->get_manifold_reduction_mode();
+}
+
+void JoltPhysicsServer3D::body_set_shape_surface(RID p_body, int p_shape_index, real_t p_friction, real_t p_bounce) {
+	JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+
+	body->set_shape_surface(p_shape_index, (float)p_friction, (float)p_bounce);
+}
+
+void JoltPhysicsServer3D::body_set_apply_gyroscopic_force(RID p_body, bool p_enable) {
+	JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+
+	body->set_apply_gyroscopic_force(p_enable);
+}
+
+bool JoltPhysicsServer3D::body_is_applying_gyroscopic_force(RID p_body) const {
+	const JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL_V(body, false);
+
+	return body->is_applying_gyroscopic_force();
+}
+
+PackedFloat64Array JoltPhysicsServer3D::shapes_get_volume_properties(const TypedArray<RID> &p_shapes) const {
+	PackedFloat64Array out;
+	out.resize(p_shapes.size() * 10);
+	double *w = out.ptrw();
+
+	for (int64_t i = 0; i < p_shapes.size(); ++i) {
+		double *row = w + 10 * i;
+		for (int k = 0; k < 10; ++k) {
+			row[k] = 0.0;
+		}
+
+		const RID shape_rid = p_shapes[i];
+		JoltShape3D *shape = shape_owner.get_or_null(shape_rid);
+		ERR_CONTINUE_MSG(shape == nullptr, vformat("shapes_get_volume_properties: entry %d is not a shape.", i));
+
+		const JPH::ShapeRefC jolt_shape = shape->try_build();
+		if (jolt_shape == nullptr) {
+			continue;
+		}
+
+		// Jolt builds a shape's mass properties at its density. A shape with no volume (a mesh, a
+		// plane, a ray) has no mass and reads all zeros.
+		const JPH::MassProperties mass_properties = jolt_shape->GetMassProperties();
+		if (!(mass_properties.mMass > 0.0f)) {
+			continue;
+		}
+
+		// Volume is the mass over the density; the tensor at unit density is the tensor times the
+		// volume over the mass.
+		double volume = 0.0;
+		if (jolt_shape->GetType() == JPH::EShapeType::Convex) {
+			volume = (double)mass_properties.mMass / (double)static_cast<const JPH::ConvexShape *>(jolt_shape.GetPtr())->GetDensity();
+		} else {
+			volume = (double)jolt_shape->GetVolume();
+		}
+		if (!(volume > 0.0)) {
+			continue;
+		}
+
+		const double unit = volume / (double)mass_properties.mMass;
+		const JPH::Vec3 centroid = jolt_shape->GetCenterOfMass();
+		const JPH::Mat44 &inertia = mass_properties.mInertia;
+
+		row[0] = volume;
+		row[1] = (double)centroid.GetX();
+		row[2] = (double)centroid.GetY();
+		row[3] = (double)centroid.GetZ();
+		row[4] = (double)inertia(0, 0) * unit;
+		row[5] = (double)inertia(1, 1) * unit;
+		row[6] = (double)inertia(2, 2) * unit;
+		row[7] = (double)inertia(0, 1) * unit;
+		row[8] = (double)inertia(0, 2) * unit;
+		row[9] = (double)inertia(1, 2) * unit;
+	}
+
+	return out;
 }
 
 void JoltPhysicsServer3D::body_set_state(RID p_body, BodyState p_state, const Variant &p_value) {
@@ -1282,6 +1460,37 @@ RID JoltPhysicsServer3D::gear_joint_create(RID p_body_a, const Vector3 &p_axis_a
 	return rid;
 }
 
+RID JoltPhysicsServer3D::velocity_gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, RID p_body_c, const Vector3 &p_axis_c, const Vector3 &p_coefficients) {
+	JoltBody3D *body_a = body_owner.get_or_null(p_body_a);
+	ERR_FAIL_NULL_V(body_a, RID());
+
+	JoltBody3D *body_b = body_owner.get_or_null(p_body_b);
+	ERR_FAIL_NULL_V(body_b, RID());
+
+	JoltBody3D *body_c = nullptr;
+	if (p_body_c.is_valid()) {
+		body_c = body_owner.get_or_null(p_body_c);
+		ERR_FAIL_NULL_V(body_c, RID());
+	}
+
+	ERR_FAIL_COND_V_MSG(body_a == body_b || body_c == body_a || body_c == body_b, RID(), "velocity_gear_joint_create: the bodies must be distinct.");
+	ERR_FAIL_COND_V_MSG(p_axis_a.is_zero_approx() || p_axis_b.is_zero_approx() || (body_c != nullptr && p_axis_c.is_zero_approx()), RID(), "velocity_gear_joint_create: an axis is zero.");
+
+	// As gear_joint_create: an empty base joint carries the RID and solver defaults the typed
+	// constructor copies, then the typed joint takes its RID slot.
+	JoltJoint3D *base_joint = memnew(JoltJoint3D);
+	RID rid = joint_owner.make_rid(base_joint);
+	base_joint->set_rid(rid);
+
+	JoltJoint3D *joint = memnew(JoltVelocityGearJoint3D(*base_joint, body_a, body_b, body_c, p_axis_a, p_axis_b, p_axis_c, p_coefficients));
+
+	memdelete(base_joint);
+	base_joint = nullptr;
+
+	joint_owner.replace(rid, joint);
+	return rid;
+}
+
 void JoltPhysicsServer3D::joint_clear(RID p_joint) {
 	JoltJoint3D *joint = joint_owner.get_or_null(p_joint);
 	ERR_FAIL_NULL(joint);
@@ -1569,6 +1778,26 @@ bool JoltPhysicsServer3D::generic_6dof_joint_get_flag(RID p_joint, Vector3::Axis
 	const JoltGeneric6DOFJoint3D *g6dof_joint = static_cast<const JoltGeneric6DOFJoint3D *>(joint);
 
 	return g6dof_joint->get_flag(p_axis, p_flag);
+}
+
+Vector3 JoltPhysicsServer3D::generic_6dof_joint_get_reaction_force(RID p_joint) const {
+	const JoltJoint3D *joint = joint_owner.get_or_null(p_joint);
+	ERR_FAIL_NULL_V(joint, Vector3());
+
+	ERR_FAIL_COND_V(joint->get_type() != JOINT_TYPE_6DOF, Vector3());
+	const JoltGeneric6DOFJoint3D *g6dof_joint = static_cast<const JoltGeneric6DOFJoint3D *>(joint);
+
+	return g6dof_joint->get_reaction_force();
+}
+
+Vector3 JoltPhysicsServer3D::generic_6dof_joint_get_reaction_torque(RID p_joint) const {
+	const JoltJoint3D *joint = joint_owner.get_or_null(p_joint);
+	ERR_FAIL_NULL_V(joint, Vector3());
+
+	ERR_FAIL_COND_V(joint->get_type() != JOINT_TYPE_6DOF, Vector3());
+	const JoltGeneric6DOFJoint3D *g6dof_joint = static_cast<const JoltGeneric6DOFJoint3D *>(joint);
+
+	return g6dof_joint->get_reaction_torque();
 }
 
 PhysicsServer3D::JointType JoltPhysicsServer3D::joint_get_type(RID p_joint) const {

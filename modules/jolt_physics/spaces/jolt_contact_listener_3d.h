@@ -129,6 +129,10 @@ public:
 	void pre_step();
 	void post_step();
 
+	// CRUMB: forget every manifold and area overlap, for a space whose world is rebuilt: the old
+	// world's body ids mean nothing in the new one.
+	void reset();
+
 #ifdef DEBUG_ENABLED
 	const PackedVector3Array &get_debug_contacts() const { return debug_contacts; }
 	int get_debug_contact_count() const { return debug_contact_count.load(std::memory_order_acquire); }

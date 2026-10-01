@@ -198,6 +198,12 @@ public:
 	inline Vec3					GetTotalLambdaMotorTranslation() const						{ return Vec3(mMotorTranslationConstraintPart[0].GetTotalLambda(), mMotorTranslationConstraintPart[1].GetTotalLambda(), mMotorTranslationConstraintPart[2].GetTotalLambda()); }
 	inline Vec3					GetTotalLambdaMotorRotation() const							{ return Vec3(mMotorRotationConstraintPart[0].GetTotalLambda(), mMotorRotationConstraintPart[1].GetTotalLambda(), mMotorRotationConstraintPart[2].GetTotalLambda()); }
 
+	// CRUMB: the impulse this constraint applied to body 2 in its last velocity solve, in world space:
+	// the linear one at the constraint's position, the angular one a pure moment. Body 1 received the
+	// negation of each. Only the parts the solve used are counted, on the axes it used.
+	Vec3						GetTotalImpulseLinearWS() const;
+	Vec3						GetTotalImpulseAngularWS() const;
+
 private:
 	// Calculate properties needed for the position constraint
 	inline void					GetPositionConstraintProperties(Vec3 &outR1PlusU, Vec3 &outR2, Vec3 &outU) const;

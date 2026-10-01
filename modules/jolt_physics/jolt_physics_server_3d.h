@@ -37,6 +37,7 @@ class JoltArea3D;
 class JoltBody3D;
 class JoltJobSystem;
 class JoltJoint3D;
+class JoltObject3D;
 class JoltShape3D;
 class JoltSoftBody3D;
 class JoltSpace3D;
@@ -61,6 +62,8 @@ class JoltPhysicsServer3D final : public PhysicsServer3D {
 	bool active = true;
 	bool flushing_queries = false;
 	bool doing_sync = false;
+
+	void _get_space_objects(const JoltSpace3D *p_space, LocalVector<JoltObject3D *> &r_objects) const;
 
 public:
 	enum HingeJointParamJolt {
@@ -158,6 +161,9 @@ public:
 
 	virtual PhysicsDirectSpaceState3D *space_get_direct_state(RID p_space) override;
 
+	virtual bool space_rebuild(RID p_space) override;
+	virtual PackedInt64Array space_get_body_ids(RID p_space) const override;
+
 	virtual void space_set_debug_contacts(RID p_space, int p_max_contacts) override;
 	virtual PackedVector3Array space_get_contacts(RID p_space) const override;
 	virtual int space_get_contact_count(RID p_space) const override;
@@ -249,6 +255,15 @@ public:
 	virtual Variant body_get_param(RID p_body, PhysicsServer3D::BodyParameter p_param) const override;
 
 	virtual void body_reset_mass_properties(RID p_body) override;
+
+	virtual void body_set_inertia_tensor(RID p_body, const Basis &p_inertia) override;
+	virtual Basis body_get_inertia_tensor(RID p_body) const override;
+	virtual void body_set_manifold_reduction(RID p_body, int p_mode) override;
+	virtual int body_get_manifold_reduction(RID p_body) const override;
+	virtual void body_set_shape_surface(RID p_body, int p_shape_index, real_t p_friction, real_t p_bounce) override;
+	virtual void body_set_apply_gyroscopic_force(RID p_body, bool p_enable) override;
+	virtual bool body_is_applying_gyroscopic_force(RID p_body) const override;
+	virtual PackedFloat64Array shapes_get_volume_properties(const TypedArray<RID> &p_shapes) const override;
 
 	virtual void body_set_state(RID p_body, PhysicsServer3D::BodyState p_state, const Variant &p_value) override;
 	virtual Variant body_get_state(RID p_body, PhysicsServer3D::BodyState p_state) const override;
@@ -403,6 +418,9 @@ public:
 	virtual void generic_6dof_joint_set_flag(RID p_joint, Vector3::Axis p_axis, PhysicsServer3D::G6DOFJointAxisFlag p_flag, bool p_enable) override;
 	virtual bool generic_6dof_joint_get_flag(RID p_joint, Vector3::Axis p_axis, PhysicsServer3D::G6DOFJointAxisFlag p_flag) const override;
 
+	virtual Vector3 generic_6dof_joint_get_reaction_force(RID p_joint) const override;
+	virtual Vector3 generic_6dof_joint_get_reaction_torque(RID p_joint) const override;
+
 	virtual PhysicsServer3D::JointType joint_get_type(RID p_joint) const override;
 
 	// Jolt-specific: a native GearConstraint between two rotating bodies. Axes are each body's spin axis in
@@ -410,6 +428,10 @@ public:
 	// joint RID freed like any other via free(). Declared virtual on PhysicsServer3D + bound there, so it
 	// resolves through the WrapMT singleton and dispatches back here.
 	virtual RID gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, double p_ratio) override;
+
+	// CRUMB: the velocity gear among up to three bodies (see PhysicsServer3D). Minted and freed like
+	// gear_joint_create.
+	virtual RID velocity_gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, RID p_body_c, const Vector3 &p_axis_c, const Vector3 &p_coefficients) override;
 
 	virtual void joint_set_solver_priority(RID p_joint, int p_priority) override;
 	virtual int joint_get_solver_priority(RID p_joint) const override;

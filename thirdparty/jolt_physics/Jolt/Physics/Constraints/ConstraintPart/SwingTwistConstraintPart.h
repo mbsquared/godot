@@ -527,6 +527,21 @@ public:
 		return mTwistLimitConstraintPart.GetTotalLambda();
 	}
 
+	// CRUMB: the angular impulse the swing and twist limits applied to body 2 in the last velocity
+	// solve, in world space: each active part pushes along the world axis it was set up on this step.
+	// An inactive part is skipped, never multiplied by zero, because its stored axis may be stale.
+	inline Vec3					GetTotalLambdaWS() const
+	{
+		Vec3 impulse = Vec3::sZero();
+		if (mSwingLimitYConstraintPart.IsActive())
+			impulse += mSwingLimitYConstraintPart.GetTotalLambda() * mWorldSpaceSwingLimitYRotationAxis;
+		if (mSwingLimitZConstraintPart.IsActive())
+			impulse += mSwingLimitZConstraintPart.GetTotalLambda() * mWorldSpaceSwingLimitZRotationAxis;
+		if (mTwistLimitConstraintPart.IsActive())
+			impulse += mTwistLimitConstraintPart.GetTotalLambda() * mWorldSpaceTwistLimitRotationAxis;
+		return impulse;
+	}
+
 	/// Save state of this constraint part
 	void						SaveState(StateRecorder &inStream) const
 	{

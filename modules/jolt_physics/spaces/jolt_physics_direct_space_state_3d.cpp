@@ -461,7 +461,52 @@ JoltPhysicsDirectSpaceState3D::JoltPhysicsDirectSpaceState3D(JoltSpace3D *p_spac
 		space(p_space) {
 }
 
+namespace {
+
+// CRUMB: skips the sub-shapes of one body whose shape index lies in [first, end). The rest of that
+// body, and every other body, passes. Jolt calls a filter at each level of a body's shape tree;
+// only a leaf's sub-shape id leads all the way to one part, so compound and decorator levels
+// (whose id may be empty or partial) always pass, and the filter decides on each leaf.
+class CrumbOwnShapeFilter final : public JPH::ShapeFilter {
+	const JoltShapedObject3D *object = nullptr;
+	JPH::BodyID body_id;
+	int first = 0;
+	int end = 0;
+
+public:
+	CrumbOwnShapeFilter(const JoltShapedObject3D *p_object, const JPH::BodyID &p_body_id, int p_first, int p_count) :
+			object(p_object), body_id(p_body_id), first(p_first), end(p_first + p_count) {}
+
+	virtual bool ShouldCollide(const JPH::Shape *p_shape2, const JPH::SubShapeID &p_sub_shape_id2) const override {
+		if (mBodyID2 != body_id) {
+			return true;
+		}
+		const JPH::EShapeType type = p_shape2->GetType();
+		if (type == JPH::EShapeType::Compound || type == JPH::EShapeType::Decorated) {
+			return true;
+		}
+		const int index = object->find_shape_index(p_sub_shape_id2);
+		return index < first || index >= end;
+	}
+};
+
+} // namespace
+
 bool JoltPhysicsDirectSpaceState3D::intersect_ray(const RayParameters &p_parameters, RayResult &r_result) {
+	return _intersect_ray(p_parameters, JPH::ShapeFilter(), r_result);
+}
+
+bool JoltPhysicsDirectSpaceState3D::intersect_ray_filtered(const RayParameters &p_parameters, const RID &p_own_body, int p_own_first, int p_own_count, RayResult &r_result) {
+	const JoltBody3D *own_body = JoltPhysicsServer3D::get_singleton()->get_body(p_own_body);
+	if (own_body == nullptr || own_body->get_space() != space || !own_body->in_space() || p_own_count <= 0) {
+		return _intersect_ray(p_parameters, JPH::ShapeFilter(), r_result);
+	}
+
+	const CrumbOwnShapeFilter own_filter(own_body, own_body->get_jolt_id(), p_own_first, p_own_count);
+	return _intersect_ray(p_parameters, own_filter, r_result);
+}
+
+bool JoltPhysicsDirectSpaceState3D::_intersect_ray(const RayParameters &p_parameters, const JPH::ShapeFilter &p_shape_filter, RayResult &r_result) {
 	ERR_FAIL_COND_V_MSG(space->is_stepping(), false, "intersect_ray must not be called while the physics space is being stepped.");
 
 	space->flush_pending_objects();
@@ -480,7 +525,7 @@ bool JoltPhysicsDirectSpaceState3D::intersect_ray(const RayParameters &p_paramet
 	settings.mBackFaceModeTriangles = back_face_mode;
 
 	JoltQueryCollectorClosest<JPH::CastRayCollector> collector;
-	space->get_narrow_phase_query().CastRay(ray, settings, collector, query_filter, query_filter, query_filter);
+	space->get_narrow_phase_query().CastRay(ray, settings, collector, query_filter, query_filter, query_filter, p_shape_filter);
 
 	if (!collector.had_hit()) {
 		return false;

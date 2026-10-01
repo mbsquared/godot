@@ -164,6 +164,25 @@ public:
 
 	virtual bool intersect_ray(const RayParameters &p_parameters, RayResult &r_result) = 0;
 
+	// CRUMB: the same cast with the caller's own shapes skipped: the sub-shapes of p_own_body whose
+	// shape index lies in [p_own_first, p_own_first + p_own_count). The rest of that body stays
+	// visible, so a sensor welded into a larger body still sees the body's other parts. A server
+	// without the filter casts as intersect_ray does.
+	virtual bool intersect_ray_filtered(const RayParameters &p_parameters, const RID &p_own_body, int p_own_first, int p_own_count, RayResult &r_result);
+
+private:
+	// CRUMB: the allocation-free ray. intersect_ray_hit fills the CALLING THREAD's last hit, read
+	// back with the getters on that thread before it casts again: casts run on the physics thread
+	// inside a tick, or on another thread while the loop is held, so one shared slot would let one
+	// thread read another's hit. No Dictionary and no Variant is built per cast.
+	static thread_local RayResult crumb_last_ray;
+	bool _intersect_ray_hit(RequiredParam<PhysicsRayQueryParameters3D> rp_ray_query, const RID &p_own_body = RID(), int p_own_first = 0, int p_own_count = 0);
+	Vector3 _get_last_ray_position() const;
+	Vector3 _get_last_ray_normal() const;
+	RID _get_last_ray_rid() const;
+	int _get_last_ray_shape() const;
+
+public:
 	struct ShapeResult {
 		RID rid;
 		ObjectID collider_id;
@@ -306,6 +325,15 @@ public:
 
 	// this function only works on physics process, errors and returns null otherwise
 	virtual PhysicsDirectSpaceState3D *space_get_direct_state(RID p_space) = 0;
+
+	// CRUMB: rebuild a space's physics world in place: every object leaves and re-enters a fresh
+	// world in creation order, so ids, broad phase and contact caches are those of a space that never
+	// held anything else. Poses and velocities carry over; the space's active flag is untouched.
+	// Refused (false, logged) while stepping, with any joint in the space, or with a soft body.
+	virtual bool space_rebuild(RID p_space) { return false; }
+	// CRUMB: one number per object in the space, in creation order: the creation serial in the high
+	// 32 bits and the world's raw body id in the low 32. For tests and state digests.
+	virtual PackedInt64Array space_get_body_ids(RID p_space) const { return PackedInt64Array(); }
 
 	virtual void space_set_debug_contacts(RID p_space, int p_max_contacts) = 0;
 	virtual Vector<Vector3> space_get_contacts(RID p_space) const = 0;
@@ -456,6 +484,38 @@ public:
 	virtual Variant body_get_param(RID p_body, BodyParameter p_param) const = 0;
 
 	virtual void body_reset_mass_properties(RID p_body) = 0;
+
+	// CRUMB: the full inertia tensor about the centre of mass, in the body's own axes, for a body
+	// whose mass is spread in a way no one shape describes (parts welded into one). Mass and centre
+	// of mass stay on the body's own parameters. A tensor that is not symmetric, not positive, that
+	// breaks the triangle rule of a real body, or whose principal moments are near zero is refused
+	// with an error and the previous one kept. A zero Basis clears it; so do setting the inertia
+	// parameter and resetting the mass properties. The getter reads a zero Basis when none is set.
+	virtual void body_set_inertia_tensor(RID p_body, const Basis &p_inertia) {}
+	virtual Basis body_get_inertia_tensor(RID p_body) const { return Basis(Vector3(), Vector3(), Vector3()); }
+
+	// CRUMB: whether this body's contacts are reduced to at most four points per surface pair. 0 is
+	// the server's own rule (the Jolt server reduces unless the body reports contacts), 1 always
+	// reduces, 2 never does: a body that must keep every point of a line or area contact whether or
+	// not anything reports its contacts. Jolt reduces a pair only when both bodies allow it.
+	virtual void body_set_manifold_reduction(RID p_body, int p_mode) {}
+	virtual int body_get_manifold_reduction(RID p_body) const { return 0; }
+
+	// CRUMB: the friction and bounce of one of a body's shapes, used for contacts on that shape in
+	// place of the body's own figures (a body made of parts welded together keeps each part's
+	// surface). Both negative clears it.
+	virtual void body_set_shape_surface(RID p_body, int p_shape_index, real_t p_friction, real_t p_bounce) {}
+
+	// CRUMB: whether the body's own spin turns it (the gyroscopic term: precession, the flip of a
+	// body spun about its middle axis). Off by default, as before.
+	virtual void body_set_apply_gyroscopic_force(RID p_body, bool p_enable) {}
+	virtual bool body_is_applying_gyroscopic_force(RID p_body) const { return false; }
+
+	// CRUMB: volume properties of shapes at unit density in each shape's own frame, ten numbers a
+	// shape: volume, centroid (x, y, z), and the inertia tensor's elements about the centroid (xx, yy,
+	// zz, xy, xz, yz). A shape with no volume (a mesh, a plane) reads all zeros. One call for a whole
+	// bake: each synchronous call waits for the physics loop.
+	virtual PackedFloat64Array shapes_get_volume_properties(const TypedArray<RID> &p_shapes) const { return PackedFloat64Array(); }
 
 	//state
 	enum BodyState {
@@ -703,6 +763,15 @@ public:
 	// (negate to flip mesh direction). Unlike the make_* calls it mints its own RID (no Joint3D node).
 	virtual RID gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, double p_ratio) { return RID(); }
 
+	// CRUMB: a velocity-only relation among the spins of up to three bodies, each about an axis fixed
+	// in that body: c_a (w_a . a_a) + c_b (w_b . a_b) + c_c (w_c . a_c) = 0, with the coefficients
+	// (c_a, c_b, c_c). A gear pair on a carrier that turns is (1, r, -(1 + r)); an open differential is
+	// (1, 1, -2); a geared drive's rotor, carrying the inertia it reflects to the output, is
+	// (1, -1, 1 - 1/N). No position term: none of these has a phase anything physical depends on.
+	// Axes are in each body's own frame. An empty p_body_c gives the two-body form. Solved inside the
+	// step with the other constraints; it mints its own RID like gear_joint_create.
+	virtual RID velocity_gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, RID p_body_c, const Vector3 &p_axis_c, const Vector3 &p_coefficients) { return RID(); }
+
 	virtual void hinge_joint_set_param(RID p_joint, HingeJointParam p_param, real_t p_value) = 0;
 	virtual real_t hinge_joint_get_param(RID p_joint, HingeJointParam p_param) const = 0;
 
@@ -799,6 +868,12 @@ public:
 
 	virtual void generic_6dof_joint_set_flag(RID p_joint, Vector3::Axis, G6DOFJointAxisFlag p_flag, bool p_enable) = 0;
 	virtual bool generic_6dof_joint_get_flag(RID p_joint, Vector3::Axis, G6DOFJointAxisFlag p_flag) const = 0;
+
+	// CRUMB: a generic 6DOF joint's reaction on its body A over the last step, in world space and
+	// server units: the force at the joint's position, and the pure moment. What a load cell between
+	// the two bodies would read. Zero before a space's first step and on servers without it.
+	virtual Vector3 generic_6dof_joint_get_reaction_force(RID p_joint) const { return Vector3(); }
+	virtual Vector3 generic_6dof_joint_get_reaction_torque(RID p_joint) const { return Vector3(); }
 
 	/* QUERY API */
 

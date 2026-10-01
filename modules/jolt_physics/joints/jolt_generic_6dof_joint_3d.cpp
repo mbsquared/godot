@@ -648,6 +648,48 @@ float JoltGeneric6DOFJoint3D::get_applied_torque() const {
 	return total_lambda.Length() / last_step;
 }
 
+// CRUMB: the joint's reaction on its body A over the last step, in world space and solver units:
+// the force at the joint's position. What a load cell between the two bodies would read. Zero
+// before a space's first step, as after space_rebuild (last_step 0).
+Vector3 JoltGeneric6DOFJoint3D::get_reaction_force() const {
+	const JPH::SixDOFConstraint *constraint = static_cast<const JPH::SixDOFConstraint *>(jolt_ref.GetPtr());
+	if (unlikely(constraint == nullptr)) {
+		return Vector3();
+	}
+
+	const JoltSpace3D *space = get_space();
+	ERR_FAIL_NULL_V(space, Vector3());
+
+	const float last_step = space->get_last_step();
+	if (unlikely(last_step == 0.0f)) {
+		return Vector3();
+	}
+
+	// Jolt pushes its body 2 by the impulse and its body 1 by the negation. Body A is Jolt's body 1
+	// unless body A was left out and the world took its place, which swaps the two.
+	const float sign = body_a != nullptr ? -1.0f : 1.0f;
+	return to_godot(constraint->GetTotalImpulseLinearWS()) * (sign / last_step);
+}
+
+// CRUMB: the pure moment of the same reaction, world space, solver units.
+Vector3 JoltGeneric6DOFJoint3D::get_reaction_torque() const {
+	const JPH::SixDOFConstraint *constraint = static_cast<const JPH::SixDOFConstraint *>(jolt_ref.GetPtr());
+	if (unlikely(constraint == nullptr)) {
+		return Vector3();
+	}
+
+	const JoltSpace3D *space = get_space();
+	ERR_FAIL_NULL_V(space, Vector3());
+
+	const float last_step = space->get_last_step();
+	if (unlikely(last_step == 0.0f)) {
+		return Vector3();
+	}
+
+	const float sign = body_a != nullptr ? -1.0f : 1.0f;
+	return to_godot(constraint->GetTotalImpulseAngularWS()) * (sign / last_step);
+}
+
 void JoltGeneric6DOFJoint3D::rebuild() {
 	destroy();
 

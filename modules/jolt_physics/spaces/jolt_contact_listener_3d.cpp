@@ -515,3 +515,16 @@ void JoltContactListener3D::post_step() {
 	_flush_area_exits();
 	_flush_area_enters();
 }
+
+void JoltContactListener3D::reset() {
+	MutexLock write_lock(write_mutex);
+
+	manifolds_by_shape_pair.clear();
+	area_overlaps.clear();
+	area_enters.clear();
+	area_exits.clear();
+
+#ifdef DEBUG_ENABLED
+	debug_contact_count = 0;
+#endif
+}

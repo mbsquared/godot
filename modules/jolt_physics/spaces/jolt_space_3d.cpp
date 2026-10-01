@@ -34,6 +34,7 @@
 #include "../jolt_physics_server_3d.h"
 #include "../jolt_project_settings.h"
 #include "../misc/jolt_stream_wrappers.h"
+#include "../misc/jolt_type_conversions.h"
 #include "../objects/jolt_area_3d.h"
 #include "../objects/jolt_body_3d.h"
 #include "../shapes/jolt_custom_shape_type.h"
@@ -62,6 +63,19 @@ constexpr double SPACE_DEFAULT_CONTACT_DEFAULT_BIAS = 0.8;
 constexpr double SPACE_DEFAULT_SLEEP_THRESHOLD_LINEAR = 0.1;
 constexpr double SPACE_DEFAULT_SLEEP_THRESHOLD_ANGULAR = 8.0 * Math::PI / 180;
 constexpr double SPACE_DEFAULT_SOLVER_ITERATIONS = 8;
+
+// CRUMB: the friction and bounce a contact sees on one side: the shape's own surface on a body
+// that gives that shape one, else the body's own figures. Read only, during the step.
+void crumb_contact_surface(const JPH::Body &p_body, const JPH::SubShapeID &p_sub_shape_id, float &r_friction, float &r_bounce) {
+	const JoltObject3D *object = reinterpret_cast<const JoltObject3D *>(p_body.GetUserData());
+	const JoltBody3D *body = object != nullptr ? object->as_body() : nullptr;
+	if (body != nullptr && body->has_shape_surfaces()) {
+		body->get_contact_surface(p_body, p_sub_shape_id, r_friction, r_bounce);
+		return;
+	}
+	r_friction = p_body.GetFriction();
+	r_bounce = p_body.GetRestitution();
+}
 
 } // namespace
 
@@ -104,6 +118,10 @@ JoltSpace3D::JoltSpace3D(JPH::JobSystem *p_job_system) :
 		contact_listener(new JoltContactListener3D(this)),
 		body_activation_listener(new JoltBodyActivationListener3D()),
 		physics_system(new JPH::PhysicsSystem()) {
+	_init_physics_system();
+}
+
+void JoltSpace3D::_init_physics_system() {
 	physics_system->Init((JPH::uint)JoltProjectSettings::max_bodies, 0, (JPH::uint)JoltProjectSettings::max_body_pairs, (JPH::uint)JoltProjectSettings::max_contact_constraints, *layers, *layers, *layers);
 
 	JPH::PhysicsSettings settings;
@@ -139,13 +157,95 @@ JoltSpace3D::JoltSpace3D(JPH::JobSystem *p_job_system) :
 		}
 	});
 
+	// CRUMB: each side's figure is its shape's own surface where the body gives that shape one, else
+	// the body's; the rule joining the two sides is a project setting whose default is the module's
+	// own (the smaller friction, the summed bounce), so nothing changes until something asks.
 	physics_system->SetCombineFriction([](const JPH::Body &p_body1, const JPH::SubShapeID &p_sub_shape_id1, const JPH::Body &p_body2, const JPH::SubShapeID &p_sub_shape_id2) {
-		return Math::abs(MIN(p_body1.GetFriction(), p_body2.GetFriction()));
+		float friction1 = 0.0f;
+		float bounce1 = 0.0f;
+		float friction2 = 0.0f;
+		float bounce2 = 0.0f;
+		crumb_contact_surface(p_body1, p_sub_shape_id1, friction1, bounce1);
+		crumb_contact_surface(p_body2, p_sub_shape_id2, friction2, bounce2);
+
+		switch (JoltProjectSettings::friction_combine) {
+			case JOLT_FRICTION_COMBINE_MAX:
+				return Math::abs(MAX(friction1, friction2));
+			case JOLT_FRICTION_COMBINE_AVERAGE:
+				return Math::abs(0.5f * (friction1 + friction2));
+			case JOLT_FRICTION_COMBINE_GEOMETRIC_MEAN:
+				return Math::sqrt(Math::abs(friction1 * friction2));
+			default:
+				return Math::abs(MIN(friction1, friction2));
+		}
 	});
 
 	physics_system->SetCombineRestitution([](const JPH::Body &p_body1, const JPH::SubShapeID &p_sub_shape_id1, const JPH::Body &p_body2, const JPH::SubShapeID &p_sub_shape_id2) {
-		return CLAMP(p_body1.GetRestitution() + p_body2.GetRestitution(), 0.0f, 1.0f);
+		float friction1 = 0.0f;
+		float bounce1 = 0.0f;
+		float friction2 = 0.0f;
+		float bounce2 = 0.0f;
+		crumb_contact_surface(p_body1, p_sub_shape_id1, friction1, bounce1);
+		crumb_contact_surface(p_body2, p_sub_shape_id2, friction2, bounce2);
+
+		switch (JoltProjectSettings::restitution_combine) {
+			case JOLT_RESTITUTION_COMBINE_MAX:
+				return CLAMP(MAX(bounce1, bounce2), 0.0f, 1.0f);
+			case JOLT_RESTITUTION_COMBINE_MIN:
+				return CLAMP(MIN(bounce1, bounce2), 0.0f, 1.0f);
+			case JOLT_RESTITUTION_COMBINE_AVERAGE:
+				return CLAMP(0.5f * (bounce1 + bounce2), 0.0f, 1.0f);
+			case JOLT_RESTITUTION_COMBINE_MULTIPLY:
+				return CLAMP(bounce1 * bounce2, 0.0f, 1.0f);
+			default:
+				return CLAMP(bounce1 + bounce2, 0.0f, 1.0f);
+		}
 	});
+}
+
+bool JoltSpace3D::rebuild(const LocalVector<JoltObject3D *> &p_objects) {
+	ERR_FAIL_COND_V_MSG(stepping, false, "space_rebuild refused: the space is being stepped.");
+	ERR_FAIL_COND_V_MSG(!physics_system->GetConstraints().empty(), false, "space_rebuild refused: the space holds a joint. Free every joint first; a rebuild never carries one across.");
+	for (const JoltObject3D *object : p_objects) {
+		ERR_FAIL_COND_V_MSG(object->is_soft_body(), false, "space_rebuild refused: the space holds a soft body.");
+	}
+
+	// The default area pushes its gravity into the world when it enters; the new world must end
+	// with what the old one had.
+	const JPH::Vec3 gravity_before = physics_system->GetGravity();
+
+	// Leave the old world newest first, each object recapturing its creation settings (pose,
+	// velocity, motion type) from its live body.
+	for (int64_t i = (int64_t)p_objects.size() - 1; i >= 0; --i) {
+		p_objects[i]->leave_space_for_rebuild();
+	}
+
+	pending_objects_sleeping.clear();
+	pending_objects_awake.clear();
+	contact_listener->reset();
+
+	// The world holds references to the layer tables, so it goes first.
+	delete physics_system;
+	physics_system = nullptr;
+	delete layers;
+	layers = new JoltLayers();
+	physics_system = new JPH::PhysicsSystem();
+	_init_physics_system();
+
+	last_step = 0.0f;
+
+	// Enter the fresh world oldest first: ids are handed out in creation order, as in a space that
+	// never held anything else.
+	for (JoltObject3D *object : p_objects) {
+		object->enter_space_after_rebuild();
+	}
+
+	if (physics_system->GetGravity() != gravity_before) {
+		ERR_PRINT(vformat("space_rebuild: the rebuilt world's gravity %s differs from the old world's %s.", to_godot(physics_system->GetGravity()), to_godot(gravity_before)));
+		return false;
+	}
+
+	return true;
 }
 
 JoltSpace3D::~JoltSpace3D() {

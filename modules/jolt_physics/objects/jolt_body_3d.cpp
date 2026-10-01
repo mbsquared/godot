@@ -42,6 +42,8 @@
 #include "jolt_physics_direct_body_state_3d.h"
 #include "jolt_soft_body_3d.h"
 
+#include <cmath>
+
 namespace {
 
 template <typename TValue, typename TGetter>
@@ -70,6 +72,101 @@ bool integrate(TValue &p_value, PhysicsServer3D::AreaSpaceOverrideMode p_mode, T
 			ERR_FAIL_V_MSG(false, vformat("Unhandled override mode: '%d'. This should not happen. Please report this.", p_mode));
 		}
 	}
+}
+
+// CRUMB: the three principal moments of a symmetric 3x3 matrix, by cyclic Jacobi rotations in
+// doubles, ascending.
+void crumb_symmetric_eigenvalues(const double p_m[3][3], double r_values[3]) {
+	double a[3][3];
+	for (int i = 0; i < 3; ++i) {
+		for (int j = 0; j < 3; ++j) {
+			a[i][j] = 0.5 * (p_m[i][j] + p_m[j][i]);
+		}
+	}
+	for (int sweep = 0; sweep < 32; ++sweep) {
+		const double off = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
+		const double diag = a[0][0] * a[0][0] + a[1][1] * a[1][1] + a[2][2] * a[2][2];
+		if (off <= 1e-30 * diag) {
+			break;
+		}
+		for (int p = 0; p < 2; ++p) {
+			for (int q = p + 1; q < 3; ++q) {
+				if (a[p][q] == 0.0) {
+					continue;
+				}
+				const double theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+				const double t = (theta >= 0.0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+				const double c = 1.0 / std::sqrt(t * t + 1.0);
+				const double s = t * c;
+				for (int k = 0; k < 3; ++k) {
+					const double akp = a[k][p];
+					const double akq = a[k][q];
+					a[k][p] = c * akp - s * akq;
+					a[k][q] = s * akp + c * akq;
+				}
+				for (int k = 0; k < 3; ++k) {
+					const double apk = a[p][k];
+					const double aqk = a[q][k];
+					a[p][k] = c * apk - s * aqk;
+					a[q][k] = s * apk + c * aqk;
+				}
+			}
+		}
+	}
+	r_values[0] = a[0][0];
+	r_values[1] = a[1][1];
+	r_values[2] = a[2][2];
+	if (r_values[0] > r_values[1]) {
+		SWAP(r_values[0], r_values[1]);
+	}
+	if (r_values[1] > r_values[2]) {
+		SWAP(r_values[1], r_values[2]);
+	}
+	if (r_values[0] > r_values[1]) {
+		SWAP(r_values[0], r_values[1]);
+	}
+}
+
+// CRUMB: whether a tensor can be a real rigid body's, and why not. Jolt's own failure on a bad
+// tensor is silent (a unit sphere's inertia for the body's mass), so the setter refuses here.
+bool crumb_inertia_tensor_is_valid(const Basis &p_tensor, String &r_why) {
+	double m[3][3];
+	double scale = 0.0;
+	for (int i = 0; i < 3; ++i) {
+		for (int j = 0; j < 3; ++j) {
+			m[i][j] = (double)p_tensor.rows[i][j];
+			if (!std::isfinite(m[i][j])) {
+				r_why = "an element is not finite";
+				return false;
+			}
+			scale = MAX(scale, std::fabs(m[i][j]));
+		}
+	}
+	for (int i = 0; i < 3; ++i) {
+		for (int j = i + 1; j < 3; ++j) {
+			if (std::fabs(m[i][j] - m[j][i]) > 1e-6 * scale) {
+				r_why = "it is not symmetric";
+				return false;
+			}
+		}
+	}
+	double values[3];
+	crumb_symmetric_eigenvalues(m, values);
+	if (!(values[0] > 0.0)) {
+		r_why = vformat("its principal moments (%s, %s, %s) are not all positive", String::num_scientific(values[0]), String::num_scientific(values[1]), String::num_scientific(values[2]));
+		return false;
+	}
+	if (values[0] + values[1] < values[2] * (1.0 - 1e-4)) {
+		r_why = vformat("its principal moments (%s, %s, %s) break the rule every real body keeps, I_a + I_b >= I_c", String::num_scientific(values[0]), String::num_scientific(values[1]), String::num_scientific(values[2]));
+		return false;
+	}
+	// Jolt treats a principal diagonal of length squared at most 1e-12 as a failure and silently
+	// gives the body a unit sphere's inertia.
+	if (values[0] * values[0] + values[1] * values[1] + values[2] * values[2] <= 1e-12) {
+		r_why = vformat("its principal moments (%s, %s, %s) are too close to zero for the solver", String::num_scientific(values[0]), String::num_scientific(values[1]), String::num_scientific(values[2]));
+		return false;
+	}
+	return true;
 }
 
 } // namespace
@@ -133,7 +230,8 @@ void JoltBody3D::_add_to_space() {
 	jolt_settings->mAllowedDOFs = _calculate_allowed_dofs();
 	jolt_settings->mAllowDynamicOrKinematic = true;
 	jolt_settings->mCollideKinematicVsNonDynamic = reports_all_kinematic_contacts();
-	jolt_settings->mUseManifoldReduction = !reports_contacts();
+	jolt_settings->mUseManifoldReduction = _uses_manifold_reduction();
+	jolt_settings->mApplyGyroscopicForce = apply_gyroscopic_force;
 	jolt_settings->mAllowSleeping = is_sleep_actually_allowed();
 	jolt_settings->mLinearDamping = 0.0f;
 	jolt_settings->mAngularDamping = 0.0f;
@@ -251,6 +349,23 @@ JPH::EAllowedDOFs JoltBody3D::_calculate_allowed_dofs() const {
 }
 
 JPH::MassProperties JoltBody3D::_calculate_mass_properties(const JPH::Shape &p_shape) const {
+	if (has_inertia_tensor) {
+		// CRUMB: the full tensor, about the centre of mass in body axes; Jolt diagonalises it.
+		JPH::MassProperties mass_properties = p_shape.GetMassProperties();
+		if (mass > 0) {
+			mass_properties.mMass = mass;
+		}
+		for (int i = 0; i < 3; ++i) {
+			for (int j = 0; j < 3; ++j) {
+				mass_properties.mInertia(i, j) = (float)inertia_tensor.rows[i][j];
+			}
+			mass_properties.mInertia(i, 3) = 0.0f;
+			mass_properties.mInertia(3, i) = 0.0f;
+		}
+		mass_properties.mInertia(3, 3) = 1.0f;
+		return mass_properties;
+	}
+
 	const bool calculate_mass = mass <= 0;
 	const bool calculate_inertia = inertia.x <= 0 || inertia.y <= 0 || inertia.z <= 0;
 
@@ -841,7 +956,7 @@ void JoltBody3D::set_max_contacts_reported(int p_count) {
 	contacts.resize(p_count);
 	contact_count = MIN(contact_count, p_count);
 
-	const bool use_manifold_reduction = !reports_contacts();
+	const bool use_manifold_reduction = _uses_manifold_reduction();
 
 	if (!in_space()) {
 		jolt_settings->mUseManifoldReduction = use_manifold_reduction;
@@ -906,7 +1021,102 @@ void JoltBody3D::reset_mass_properties() {
 
 	inertia.zero();
 
+	// CRUMB: a reset clears the full tensor too, so the node and the server never disagree.
+	has_inertia_tensor = false;
+	inertia_tensor = Basis(Vector3(), Vector3(), Vector3());
+
 	_update_mass_properties();
+}
+
+bool JoltBody3D::_uses_manifold_reduction() const {
+	return manifold_reduction_mode == 0 ? !reports_contacts() : manifold_reduction_mode == 1;
+}
+
+void JoltBody3D::set_manifold_reduction_mode(int p_mode) {
+	ERR_FAIL_INDEX_MSG(p_mode, 3, "The manifold reduction mode is 0 (the module's rule), 1 (always) or 2 (never).");
+
+	manifold_reduction_mode = p_mode;
+
+	const bool use_manifold_reduction = _uses_manifold_reduction();
+
+	if (!in_space()) {
+		jolt_settings->mUseManifoldReduction = use_manifold_reduction;
+	} else {
+		space->get_body_iface().SetUseManifoldReduction(jolt_body->GetID(), use_manifold_reduction);
+	}
+}
+
+void JoltBody3D::set_apply_gyroscopic_force(bool p_enable) {
+	apply_gyroscopic_force = p_enable;
+
+	if (!in_space()) {
+		jolt_settings->mApplyGyroscopicForce = p_enable;
+	} else if (jolt_body->IsRigidBody()) {
+		jolt_body->SetApplyGyroscopicForce(p_enable);
+	}
+
+	wake_up();
+}
+
+void JoltBody3D::set_inertia_tensor(const Basis &p_inertia) {
+	const Basis zero = Basis(Vector3(), Vector3(), Vector3());
+
+	if (p_inertia == zero) {
+		if (has_inertia_tensor) {
+			has_inertia_tensor = false;
+			inertia_tensor = zero;
+			_update_mass_properties();
+		}
+		return;
+	}
+
+	String why;
+	if (!crumb_inertia_tensor_is_valid(p_inertia, why)) {
+		ERR_PRINT(vformat("Refused the inertia tensor %s for '%s': %s. The previous inertia is kept.", String(p_inertia), to_string(), why));
+		return;
+	}
+
+	inertia_tensor = p_inertia;
+	has_inertia_tensor = true;
+
+	_update_mass_properties();
+}
+
+void JoltBody3D::set_shape_surface(int p_index, float p_friction, float p_bounce) {
+	ERR_FAIL_INDEX(p_index, (int)shapes.size());
+
+	if (p_friction < 0.0f && p_bounce < 0.0f) {
+		shapes[p_index].clear_surface();
+	} else {
+		shapes[p_index].set_surface(p_friction, p_bounce);
+	}
+
+	shape_surfaces = false;
+	for (const JoltShapeInstance3D &shape : shapes) {
+		shape_surfaces = shape_surfaces || shape.has_own_surface();
+	}
+
+	wake_up();
+}
+
+void JoltBody3D::get_contact_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id, float &r_friction, float &r_bounce) const {
+	r_friction = p_jolt_body.GetFriction();
+	r_bounce = p_jolt_body.GetRestitution();
+
+	if (!shape_surfaces) {
+		return;
+	}
+
+	const int index = find_shape_index((uint32_t)p_jolt_body.GetShape()->GetSubShapeUserData(p_sub_shape_id));
+	if (index < 0) {
+		return;
+	}
+
+	const JoltShapeInstance3D &shape = shapes[index];
+	if (shape.has_own_surface()) {
+		r_friction = shape.get_surface_friction();
+		r_bounce = shape.get_surface_bounce();
+	}
 }
 
 void JoltBody3D::apply_force(const Vector3 &p_force, const Vector3 &p_position) {
@@ -1209,7 +1419,13 @@ void JoltBody3D::set_mass(float p_mass) {
 }
 
 void JoltBody3D::set_inertia(const Vector3 &p_inertia) {
-	if (p_inertia != inertia) {
+	// CRUMB: setting the inertia parameter clears a full tensor, so the node and the server never
+	// disagree silently.
+	const bool cleared_tensor = has_inertia_tensor;
+	has_inertia_tensor = false;
+	inertia_tensor = Basis(Vector3(), Vector3(), Vector3());
+
+	if (p_inertia != inertia || cleared_tensor) {
 		inertia = p_inertia;
 		_update_mass_properties();
 	}

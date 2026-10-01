@@ -36,6 +36,14 @@
 #include "../spaces/jolt_space_3d.h"
 #include "jolt_group_filter.h"
 
+#include <atomic>
+
+namespace {
+
+std::atomic<uint64_t> crumb_next_creation_serial{ 1 };
+
+} // namespace
+
 void JoltObject3D::_remove_from_space() {
 	if (!in_space()) {
 		return;
@@ -70,8 +78,23 @@ void JoltObject3D::_collision_mask_changed() {
 	_update_object_layer();
 }
 
+void JoltObject3D::leave_space_for_rebuild() {
+	ERR_FAIL_NULL(space);
+
+	_space_changing();
+	_remove_from_space();
+}
+
+void JoltObject3D::enter_space_after_rebuild() {
+	ERR_FAIL_NULL(space);
+
+	_add_to_space();
+	_space_changed();
+}
+
 JoltObject3D::JoltObject3D(ObjectType p_object_type) :
 		object_type(p_object_type) {
+	creation_serial = crumb_next_creation_serial.fetch_add(1, std::memory_order_relaxed);
 }
 
 JoltObject3D::~JoltObject3D() = default;

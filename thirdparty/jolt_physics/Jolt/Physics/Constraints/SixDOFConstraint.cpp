@@ -573,6 +573,47 @@ void SixDOFConstraint::SetupVelocityConstraint(float inDeltaTime)
 	}
 }
 
+// CRUMB: the impulses of the last velocity solve as world vectors on body 2. The gating mirrors
+// SolveVelocityConstraint, so a part is counted exactly when the solve used it, along the axis it
+// was set up on in SetupVelocityConstraint.
+Vec3 SixDOFConstraint::GetTotalImpulseLinearWS() const
+{
+	Vec3 impulse = Vec3::sZero();
+	if (IsTranslationFullyConstrained())
+	{
+		if (mPointConstraintPart.IsActive())
+			impulse += mPointConstraintPart.GetTotalLambda();
+	}
+	else if (IsTranslationConstrained())
+	{
+		for (int i = 0; i < 3; ++i)
+			if (mTranslationConstraintPart[i].IsActive())
+				impulse += mTranslationConstraintPart[i].GetTotalLambda() * mTranslationAxis[i];
+	}
+	if (mTranslationMotorActive)
+		for (int i = 0; i < 3; ++i)
+			if (mMotorTranslationConstraintPart[i].IsActive())
+				impulse += mMotorTranslationConstraintPart[i].GetTotalLambda() * mTranslationAxis[i];
+	return impulse;
+}
+
+Vec3 SixDOFConstraint::GetTotalImpulseAngularWS() const
+{
+	Vec3 impulse = Vec3::sZero();
+	if (IsRotationFullyConstrained())
+	{
+		if (mRotationConstraintPart.IsActive())
+			impulse += mRotationConstraintPart.GetTotalLambda();
+	}
+	else if (IsRotationConstrained())
+		impulse += mSwingTwistConstraintPart.GetTotalLambdaWS();
+	if (mRotationMotorActive)
+		for (int i = 0; i < 3; ++i)
+			if (mMotorRotationConstraintPart[i].IsActive())
+				impulse += mMotorRotationConstraintPart[i].GetTotalLambda() * mRotationAxis[i];
+	return impulse;
+}
+
 void SixDOFConstraint::ResetWarmStart()
 {
 	for (AxisConstraintPart &c : mMotorTranslationConstraintPart)

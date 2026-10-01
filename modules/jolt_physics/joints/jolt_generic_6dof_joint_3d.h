@@ -120,5 +120,9 @@ public:
 	float get_applied_force() const;
 	float get_applied_torque() const;
 
+	// CRUMB: the joint's reaction on its body A over the last step, world space, solver units.
+	Vector3 get_reaction_force() const;
+	Vector3 get_reaction_torque() const;
+
 	virtual void rebuild() override;
 };

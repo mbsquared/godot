@@ -68,6 +68,11 @@ class JoltShapeInstance3D {
 	uint32_t id = next_id++;
 	bool disabled = false;
 
+	// CRUMB: this shape's own friction and bounce, used for its contacts in place of the body's.
+	float surface_friction = 0.0f;
+	float surface_bounce = 0.0f;
+	bool has_surface = false;
+
 public:
 	JoltShapeInstance3D() = default;
 	JoltShapeInstance3D(JoltShapedObject3D *p_parent, JoltShape3D *p_shape, const Transform3D &p_transform = Transform3D(), const Vector3 &p_scale = Vector3(1.0f, 1.0f, 1.0f), bool p_disabled = false);
@@ -94,6 +99,20 @@ public:
 
 	void enable() { disabled = false; }
 	void disable() { disabled = true; }
+
+	bool has_own_surface() const { return has_surface; }
+	float get_surface_friction() const { return surface_friction; }
+	float get_surface_bounce() const { return surface_bounce; }
+	void set_surface(float p_friction, float p_bounce) {
+		surface_friction = p_friction;
+		surface_bounce = p_bounce;
+		has_surface = true;
+	}
+	void clear_surface() {
+		surface_friction = 0.0f;
+		surface_bounce = 0.0f;
+		has_surface = false;
+	}
 
 	bool try_build();
 };

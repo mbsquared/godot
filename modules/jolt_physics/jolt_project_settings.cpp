@@ -73,6 +73,11 @@ void JoltProjectSettings::register_settings() {
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "physics/jolt_physics_3d/joints/world_node", PROPERTY_HINT_ENUM, U"Node A,Node B"), JOLT_JOINT_WORLD_NODE_A);
 
+	// CRUMB: how a contact joins its two sides' friction and bounce. The defaults are the module's
+	// own rules, so a project that never sets them simulates exactly as before.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "physics/jolt_physics_3d/crumb/friction_combine", PROPERTY_HINT_ENUM, U"Min,Max,Average,Geometric Mean"), JOLT_FRICTION_COMBINE_MIN);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "physics/jolt_physics_3d/crumb/restitution_combine", PROPERTY_HINT_ENUM, U"Sum,Max,Min,Average,Multiply"), JOLT_RESTITUTION_COMBINE_SUM);
+
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "physics/jolt_physics_3d/limits/temporary_memory_buffer_size", PROPERTY_HINT_RANGE, U"1,32,or_greater,suffix:MiB"), 32);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "physics/jolt_physics_3d/limits/world_boundary_shape_size", PROPERTY_HINT_RANGE, U"2,2000,0.1,or_greater,suffix:m"), 2000.0f);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "physics/jolt_physics_3d/limits/max_linear_velocity", PROPERTY_HINT_RANGE, U"0,500,0.01,or_greater,suffix:m/s"), 500.0f);
@@ -121,6 +126,9 @@ void JoltProjectSettings::read_settings() {
 	active_edge_threshold_cos = Math::cos(active_edge_threshold);
 
 	joint_world_node = (JoltJointWorldNode)(int)GLOBAL_GET("physics/jolt_physics_3d/joints/world_node");
+
+	friction_combine = (JoltFrictionCombine)(int)GLOBAL_GET("physics/jolt_physics_3d/crumb/friction_combine");
+	restitution_combine = (JoltRestitutionCombine)(int)GLOBAL_GET("physics/jolt_physics_3d/crumb/restitution_combine");
 
 	temp_memory_mib = GLOBAL_GET("physics/jolt_physics_3d/limits/temporary_memory_buffer_size");
 	temp_memory_b = temp_memory_mib * 1024 * 1024;
