@@ -32,6 +32,9 @@
 
 #include "soft_layer_table/jolt_soft_layer_table.gen.h"
 
+#include "../jolt_project_settings.h"
+
+#include "Jolt/Geometry/AABox.h"
 #include "Jolt/Physics/Collision/Shape/CapsuleShape.h"
 #include "Jolt/Physics/Collision/Shape/CompoundShape.h"
 #include "Jolt/Physics/Collision/Shape/CylinderShape.h"
@@ -204,6 +207,71 @@ Poly rect(double p_x0, double p_x1, double p_y0, double p_y1) {
 	return r;
 }
 
+// p_ccw must be counter-clockwise; true when the point is inside or within p_tol of its edges
+bool inside_convex_tol(const Poly &p_ccw, double p_x, double p_y, double p_tol) {
+	for (int k = 0; k < p_ccw.n; ++k) {
+		const int k1 = (k + 1) % p_ccw.n;
+		const double ex = p_ccw.x[k1] - p_ccw.x[k];
+		const double ey = p_ccw.y[k1] - p_ccw.y[k];
+		const double len = std::sqrt(ex * ex + ey * ey);
+		if (len > 0.0 && (ex * (p_y - p_ccw.y[k]) - ey * (p_x - p_ccw.x[k])) / len < -p_tol) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// The partner's faces a soft face is pressed by (counter-clockwise, in the patch frame): one, or several coplanar
+// ones (brief 5.2), with each face's world centroid, the fixed order in which they are taken
+constexpr int MAX_PARTNERS = 8;
+
+struct PartnerSet {
+	int n = 0;
+	Poly face[MAX_PARTNERS];
+	double key[MAX_PARTNERS][3];
+};
+
+bool inside_any(const PartnerSet &p_set, double p_x, double p_y) {
+	for (int i = 0; i < p_set.n; ++i) {
+		if (inside_convex(p_set.face[i], p_x, p_y)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// The exact area moments of a counter-clockwise polygon: A, the integrals of x and y, and of x^2, y^2 and x y
+struct PolyMoments {
+	double A = 0.0, Sx = 0.0, Sy = 0.0, Sxx = 0.0, Syy = 0.0, Sxy = 0.0;
+};
+
+PolyMoments poly_moments(const Poly &p_ccw) {
+	PolyMoments m;
+	for (int k = 0; k < p_ccw.n; ++k) {
+		const int k1 = (k + 1) % p_ccw.n;
+		const double x0 = p_ccw.x[k], y0 = p_ccw.y[k], x1 = p_ccw.x[k1], y1 = p_ccw.y[k1];
+		const double c = x0 * y1 - x1 * y0;
+		m.A += c;
+		m.Sx += (x0 + x1) * c;
+		m.Sy += (y0 + y1) * c;
+		m.Sxx += (x0 * x0 + x0 * x1 + x1 * x1) * c;
+		m.Syy += (y0 * y0 + y0 * y1 + y1 * y1) * c;
+		m.Sxy += (x0 * y1 + 2.0 * x0 * y0 + 2.0 * x1 * y1 + x1 * y0) * c;
+	}
+	m.A /= 2.0;
+	m.Sx /= 6.0;
+	m.Sy /= 6.0;
+	m.Sxx /= 12.0;
+	m.Syy /= 12.0;
+	m.Sxy /= 24.0;
+	return m;
+}
+
+// Seven-point quadrature on a triangle, exact to degree 5 (barycentric weights a, b, c and the point's weight)
+const double TRI_QA[7] = { 1.0 / 3.0, 0.059715871789770, 0.470142064105115, 0.470142064105115, 0.797426985353087, 0.101286507323456, 0.101286507323456 };
+const double TRI_QB[7] = { 1.0 / 3.0, 0.470142064105115, 0.059715871789770, 0.470142064105115, 0.101286507323456, 0.797426985353087, 0.101286507323456 };
+const double TRI_QW[7] = { 0.225, 0.132394152788506, 0.132394152788506, 0.132394152788506, 0.125939180544827, 0.125939180544827, 0.125939180544827 };
+
 // ---------------------------------------------------------------------------------------------------------------
 // The face grid (design 4.2, brief 3.1): cell-centred over a box in the patch frame; arrays are indexed
 // i_long * n_short + i_short, so the half-bandwidth is n_short.
@@ -367,7 +435,7 @@ struct FaceFig {
 // The split law with the contact set by complementarity (p >= 0, w >= d, p (w - d) = 0) on the grid: active-set passes
 // from p_active0 (the tail's set) or the geometric overlap, at most ACTIVE_SET_CAP; then the figures, and the normal
 // and tilt stiffnesses with the last set held
-bool face_grid(const Poly &p_soft_ccw, const Poly &p_partner_ccw, double p_d0, double p_gx, double p_gy, const Coeffs &p_co, double p_x0, double p_x1, double p_y0, double p_y1, int p_n_long, int p_n_short, const bool *p_active0, FaceFig &r_fig) {
+bool face_grid(const Poly &p_soft_ccw, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, const Coeffs &p_co, double p_x0, double p_x1, double p_y0, double p_y1, int p_n_long, int p_n_short, const bool *p_active0, FaceFig &r_fig) {
 	Grid &g = r_fig.grid;
 	r_fig.empty = true;
 	if (!make_grid(p_x0, p_x1, p_y0, p_y1, p_n_long, p_n_short, g)) {
@@ -381,7 +449,7 @@ bool face_grid(const Poly &p_soft_ccw, const Poly &p_partner_ccw, double p_d0, d
 		X[k] = g.X(k);
 		Y[k] = g.Y(k);
 		dom[k] = inside_convex(p_soft_ccw, X[k], Y[k]);
-		cont[k] = dom[k] && inside_convex(p_partner_ccw, X[k], Y[k]);
+		cont[k] = dom[k] && inside_any(p_partners, X[k], Y[k]);
 		d[k] = p_d0 + p_gx * X[k] + p_gy * Y[k];
 		active[k] = p_active0 != nullptr ? (p_active0[k] && cont[k] && dom[k]) : (cont[k] && d[k] > 0.0 && dom[k]);
 	}
@@ -542,28 +610,48 @@ struct FaceLaw {
 	bool richardson = false;
 };
 
-bool face_law(const Poly &p_soft, const Poly &p_partner, double p_d0, double p_gx, double p_gy, const Coeffs &p_co, const JPH::SoftContactTail *p_tail, FaceLaw &r_law) {
+// p_partners' faces are counter-clockwise; with several (coplanar faces, brief 5.2) the field is one over all of them
+bool face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, const Coeffs &p_co, const JPH::SoftContactTail *p_tail, FaceLaw &r_law) {
 	r_law.empty = true;
-	Poly overlap;
-	clip_convex(p_soft, p_partner, overlap);
-	if (overlap.n > 0) {
-		Poly cut;
-		clip_halfplane(overlap, p_gx, p_gy, p_d0, cut);
-		overlap = cut;
+	// The pressed part of the soft face's overlap with each partner face, and their joint bounds
+	bool pressed = false;
+	double ox0 = 0.0, ox1 = 0.0, oy0 = 0.0, oy1 = 0.0;
+	for (int i = 0; i < p_partners.n; ++i) {
+		Poly overlap;
+		clip_convex(p_soft, p_partners.face[i], overlap);
+		if (overlap.n > 0) {
+			Poly cut;
+			clip_halfplane(overlap, p_gx, p_gy, p_d0, cut);
+			overlap = cut;
+		}
+		if (overlap.n < 3) {
+			continue;
+		}
+		double a0, a1, b0, b1;
+		poly_bounds(overlap, a0, a1, b0, b1);
+		if (!pressed) {
+			ox0 = a0;
+			ox1 = a1;
+			oy0 = b0;
+			oy1 = b1;
+			pressed = true;
+		} else {
+			ox0 = MIN(ox0, a0);
+			ox1 = MAX(ox1, a1);
+			oy0 = MIN(oy0, b0);
+			oy1 = MAX(oy1, b1);
+		}
 	}
-	if (overlap.n < 3) {
+	if (!pressed) {
 		return false;
 	}
-	double ox0, ox1, oy0, oy1, sx0, sx1, sy0, sy1;
-	poly_bounds(overlap, ox0, ox1, oy0, oy1);
+	double sx0, sx1, sy0, sy1;
 	poly_bounds(p_soft, sx0, sx1, sy0, sy1);
 	const double g = p_co.h;
 	const double bx0 = MAX(ox0 - g, sx0), bx1 = MIN(ox1 + g, sx1), by0 = MAX(oy0 - g, sy0), by1 = MIN(oy1 + g, sy1);
 
 	Poly soft_ccw = p_soft;
 	make_ccw(soft_ccw);
-	Poly partner_ccw = p_partner;
-	make_ccw(partner_ccw);
 
 	// The tail's contact set when it belongs to the same grid
 	bool tail_active[MAX_CELLS];
@@ -579,7 +667,7 @@ bool face_law(const Poly &p_soft, const Poly &p_partner, double p_d0, double p_g
 	}
 
 	FaceFig &full = r_law.full;
-	if (!face_grid(soft_ccw, partner_ccw, p_d0, p_gx, p_gy, p_co, bx0, bx1, by0, by1, 0, N_SHORT, active0, full) || full.empty) {
+	if (!face_grid(soft_ccw, p_partners, p_d0, p_gx, p_gy, p_co, bx0, bx1, by0, by1, 0, N_SHORT, active0, full) || full.empty) {
 		return false;
 	}
 	r_law.empty = false;
@@ -600,7 +688,7 @@ bool face_law(const Poly &p_soft, const Poly &p_partner, double p_d0, double p_g
 
 	thread_local FaceFig scratch_half;
 	FaceFig *half = &scratch_half;
-	if (face_grid(soft_ccw, partner_ccw, p_d0, p_gx, p_gy, p_co, bx0, bx1, by0, by1, full.grid.nl / 2, N_SHORT / 2, nullptr, *half) && !half->empty && half->F > 0.0) {
+	if (face_grid(soft_ccw, p_partners, p_d0, p_gx, p_gy, p_co, bx0, bx1, by0, by1, full.grid.nl / 2, N_SHORT / 2, nullptr, *half) && !half->empty && half->F > 0.0) {
 		auto rich = [](double p_full, double p_half) { return (4.0 * p_full - p_half) / 3.0; };
 		r_law.F = rich(full.F, half->F);
 		r_law.cx = rich(full.cx, half->cx);
@@ -1386,6 +1474,88 @@ struct SupportFace {
 	JPH::Vec3 v[32]; // relative to the manifold's base offset
 };
 
+// Brief 5.2: the partner body's faces that lie in its pressed face's plane (outward normal within 1 deg of
+// p_out_normal, plane within the speculative distance of p_partner_face) and overlap the soft face, projected on the
+// patch frame (o, t1, t2), counter-clockwise, in a fixed order (by world centroid). Empty for a partner of one convex
+// shape, which has one face there.
+void coplanar_faces(const JPH::Body &p_partner, JPH::Vec3Arg p_out_normal, const SupportFace &p_partner_face, const SupportFace &p_soft_face, const Poly &p_soft_ccw, JPH::RVec3Arg p_base, const JPH::Vec3 &p_o, const JPH::Vec3 &p_t1, const JPH::Vec3 &p_t2, PartnerSet &r_set) {
+	r_set.n = 0;
+	const JPH::Shape *root = p_partner.GetShape();
+	for (int depth = 0; depth < 16 && root != nullptr && root->GetType() == JPH::EShapeType::Decorated; ++depth) {
+		root = static_cast<const JPH::DecoratedShape *>(root)->GetInnerShape();
+	}
+	if (root == nullptr || root->GetType() == JPH::EShapeType::Convex || p_partner_face.n < 3 || p_soft_face.n < 3) {
+		return;
+	}
+	const float spec = JoltProjectSettings::speculative_contact_distance;
+	JPH::AABox box;
+	for (int k = 0; k < p_soft_face.n; ++k) {
+		box.Encapsulate(JPH::Vec3(p_base + p_soft_face.v[k]));
+	}
+	box.ExpandBy(JPH::Vec3::sReplicate(spec + 1e-3f));
+	const JPH::Vec3 pf0 = p_partner_face.v[0];
+	const float cos_1deg = 0.999847695f;
+	JPH::Shape::GetTrianglesContext context;
+	p_partner.GetShape()->GetTrianglesStart(context, box, p_partner.GetCenterOfMassPosition(), p_partner.GetRotation(), JPH::Vec3::sOne());
+	constexpr int batch = JPH::Shape::cGetTrianglesMinTrianglesRequested;
+	JPH::Float3 vertices[3 * batch];
+	for (int guard = 0; guard < 64; ++guard) {
+		const int count = p_partner.GetShape()->GetTrianglesNext(context, batch, vertices);
+		if (count <= 0) {
+			break;
+		}
+		for (int t = 0; t < count; ++t) {
+			JPH::Vec3 v[3];
+			double key[3] = { 0.0, 0.0, 0.0 };
+			for (int c = 0; c < 3; ++c) {
+				const JPH::Float3 &f = vertices[3 * t + c];
+				key[0] += double(f.x) / 3.0;
+				key[1] += double(f.y) / 3.0;
+				key[2] += double(f.z) / 3.0;
+				v[c] = JPH::Vec3(JPH::RVec3(JPH::Vec3(f)) - p_base);
+			}
+			JPH::Vec3 nt = (v[1] - v[0]).Cross(v[2] - v[0]);
+			const float len = nt.Length();
+			if (!(len > 0.0f)) {
+				continue;
+			}
+			nt /= len;
+			if (nt.Dot(p_out_normal) < cos_1deg || std::abs((v[0] - pf0).Dot(p_out_normal)) > spec) {
+				continue;
+			}
+			Poly tri;
+			for (int c = 0; c < 3; ++c) {
+				tri.push((v[c] - p_o).Dot(p_t1), (v[c] - p_o).Dot(p_t2));
+			}
+			make_ccw(tri);
+			Poly cut;
+			clip_convex(p_soft_ccw, tri, cut);
+			if (cut.n < 3 || !(std::abs(signed_area(cut)) > 1e-9) || r_set.n >= MAX_PARTNERS) {
+				continue;
+			}
+			// insert in order of the world centroid (x, then y, then z)
+			int at = r_set.n;
+			while (at > 0) {
+				const double *prev = r_set.key[at - 1];
+				const bool after = prev[0] < key[0] || (prev[0] == key[0] && (prev[1] < key[1] || (prev[1] == key[1] && prev[2] <= key[2])));
+				if (after) {
+					break;
+				}
+				r_set.face[at] = r_set.face[at - 1];
+				r_set.key[at][0] = prev[0];
+				r_set.key[at][1] = prev[1];
+				r_set.key[at][2] = prev[2];
+				--at;
+			}
+			r_set.face[at] = tri;
+			r_set.key[at][0] = key[0];
+			r_set.key[at][1] = key[1];
+			r_set.key[at][2] = key[2];
+			++r_set.n;
+		}
+	}
+}
+
 void supporting_face(const JPH::Body &p_body, const JPH::SubShapeID &p_id, JPH::Vec3Arg p_outward_world, JPH::RVec3Arg p_base, SupportFace &r_face) {
 	JPH::Shape::SupportingFace face;
 	const JPH::Mat44 com = p_body.GetCenterOfMassTransform().PostTranslated(-p_base).ToMat44();
@@ -1669,6 +1839,121 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		r_patch.mTangent1 = t1;
 		r_patch.mTangent2 = t2;
 
+		// Brief 5.2: against a partner of several coplanar faces (a mesh's triangles, a compound's children) the footprint
+		// is one field, not one patch per face: each would take the rest of the layer as free and read it soft. The
+		// manifold on the leading face (the one under the soft face's centroid; the first in the fixed order when several
+		// hold it, or when none does) builds the field over every coplanar face under the footprint; the others keep only
+		// their core guard. A partner face that already holds every coplanar face (a box's quad over its two
+		// triangles) is the ordinary case.
+		PartnerSet partners;
+		partners.n = 1;
+		partners.face[0] = partner_poly;
+		make_ccw(partners.face[0]);
+		bool follower = false;
+		if (soft.kind == JoltSoftSurface3D::KIND_LAYER || soft.kind == JoltSoftSurface3D::KIND_LUMPED) {
+			thread_local PartnerSet scratch_set;
+			PartnerSet *set = &scratch_set;
+			Poly soft_ccw = soft_poly;
+			make_ccw(soft_ccw);
+			coplanar_faces(soft_is_1 ? body2 : body1, soft_is_1 ? -n : n, soft_is_1 ? face2 : face1, soft_is_1 ? face1 : face2, soft_ccw, base, o, t1, t2, *set);
+			bool covers = true;
+			for (int i = 0; i < set->n && covers; ++i) {
+				double mx = 0.0, my = 0.0;
+				for (int k = 0; k < set->face[i].n; ++k) {
+					mx += set->face[i].x[k];
+					my += set->face[i].y[k];
+				}
+				covers = inside_convex_tol(partners.face[0], mx / set->face[i].n, my / set->face[i].n, 1e-5);
+			}
+			if (set->n >= 2 && !covers) {
+				const PolyMoments sm = poly_moments(soft_ccw);
+				const double scx = sm.A > 0.0 ? sm.Sx / sm.A : 0.0;
+				const double scy = sm.A > 0.0 ? sm.Sy / sm.A : 0.0;
+				int leader = 0;
+				for (int i = 0; i < set->n; ++i) {
+					if (inside_convex_tol(set->face[i], scx, scy, 1e-5)) {
+						leader = i;
+						break;
+					}
+				}
+				double lx = 0.0, ly = 0.0;
+				for (int k = 0; k < set->face[leader].n; ++k) {
+					lx += set->face[leader].x[k];
+					ly += set->face[leader].y[k];
+				}
+				if (inside_convex_tol(partners.face[0], lx / set->face[leader].n, ly / set->face[leader].n, 1e-5)) {
+					partners = *set;
+				} else {
+					follower = true;
+				}
+			}
+		}
+		if (follower) {
+			const double follower_layer = soft.kind == JoltSoftSurface3D::KIND_LAYER ? (two_layers ? s1->thickness + s2->thickness : soft.thickness) : (soft.travel > 0.0 ? soft.travel : 1e6);
+			r_patch.mForce = 0.0f;
+			r_patch.mNormalStiffness = 0.0f;
+			r_patch.mLawCoefficient = 0.0f;
+			r_patch.mLawExponent = 1.0f;
+			r_patch.mStaticFriction = 0.0f;
+			r_patch.mSlidingFriction = 0.0f;
+			r_patch.mCentre = r_patch.mDeepest;
+			r_patch.mCoreGap = float(follower_layer - dmax);
+			r_patch.mNumTilt = 0;
+			r_patch.mNumRoll = 0;
+			r_patch.mRigidStick = true;
+			r_patch.mEnabled = true;
+			r_result.outcome = JoltSoftBuildResult::BUILT;
+			return true;
+		}
+		if (partners.n > 1) {
+			// The leading face's deepest point is the whole footprint's (a level contact: the footprint's centroid), so a
+			// first touch's impact row and the core guard act where the whole field does, not off at its own face
+			thread_local Poly scratch_pieces[MAX_PARTNERS];
+			Poly *pieces = scratch_pieces;
+			int num_pieces = 0;
+			double dm = -1e300;
+			for (int i = 0; i < partners.n; ++i) {
+				clip_convex(soft_poly, partners.face[i], pieces[num_pieces]);
+				if (pieces[num_pieces].n < 3) {
+					continue;
+				}
+				for (int k = 0; k < pieces[num_pieces].n; ++k) {
+					dm = MAX(dm, d0 + gx * pieces[num_pieces].x[k] + gy * pieces[num_pieces].y[k]);
+				}
+				++num_pieces;
+			}
+			if (num_pieces > 0) {
+				bool level = true;
+				double sx = 0.0, sy = 0.0, cnt = 0.0, ua = 0.0, usx = 0.0, usy = 0.0;
+				for (int i = 0; i < num_pieces; ++i) {
+					make_ccw(pieces[i]);
+					const PolyMoments pm = poly_moments(pieces[i]);
+					ua += pm.A;
+					usx += pm.Sx;
+					usy += pm.Sy;
+					for (int k = 0; k < pieces[i].n; ++k) {
+						if (d0 + gx * pieces[i].x[k] + gy * pieces[i].y[k] >= dm - 1e-6) {
+							sx += pieces[i].x[k];
+							sy += pieces[i].y[k];
+							cnt += 1.0;
+						} else {
+							level = false;
+						}
+					}
+				}
+				if (level && ua > 0.0) {
+					ddx = usx / ua;
+					ddy = usy / ua;
+				} else if (cnt > 0.0) {
+					ddx = sx / cnt;
+					ddy = sy / cnt;
+				}
+				dmax = dm;
+				r_patch.mDeepest = world(ddx, ddy);
+				r_patch.mSquash = float(dmax);
+			}
+		}
+
 		double layer = 0.0;
 		Coeffs co;
 		double share = 1.0; // two layers: the softer side's share of the squash
@@ -1682,8 +1967,8 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				thread_local FaceLaw scratch_l2;
 				FaceLaw *l1 = &scratch_l1;
 				FaceLaw *l2 = &scratch_l2;
-				const bool ok1 = face_law(soft_poly, partner_poly, 1.0, 0.0, 0.0, c1, nullptr, *l1);
-				const bool ok2 = face_law(soft_poly, partner_poly, 1.0, 0.0, 0.0, c2, nullptr, *l2);
+				const bool ok1 = face_law(soft_poly, partners, 1.0, 0.0, 0.0, c1, nullptr, *l1);
+				const bool ok2 = face_law(soft_poly, partners, 1.0, 0.0, 0.0, c2, nullptr, *l2);
 				if (ok1 && ok2 && l1->k_n > 0.0 && l2->k_n > 0.0) {
 					const double k1 = l1->k_n, k2 = l2->k_n;
 					share = (1.0 / (1.0 / k1 + 1.0 / k2)) / MIN(k1, k2);
@@ -1703,28 +1988,135 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		FaceLaw *law = &scratch_law;
 		bool pressed = false;
 		if (soft.kind == JoltSoftSurface3D::KIND_LAYER) {
-			pressed = face_law(soft_poly, partner_poly, d0 * share, gx * share, gy * share, co, p_in.tail, *law) && !law->empty;
+			pressed = face_law(soft_poly, partners, d0 * share, gx * share, gy * share, co, p_in.tail, *law) && !law->empty;
 		}
 		double F = 0.0, kn = 0.0, cx = ddx, cy = ddy;
 		double ratio = 1.0;
 		if (soft.kind == JoltSoftSurface3D::KIND_LUMPED) {
-			// A lumped body against a face: F = K_l d, uniform over the overlap (the flat's bed-of-springs profile)
-			double ax = 0.0, ay = 0.0;
-			for (int k = 0; k < overlap.n; ++k) {
-				ax += overlap.x[k];
-				ay += overlap.y[k];
+			// A lumped body against a face: the flat's bed-of-springs profile (design 2.4), springs of K_l / A per area
+			// over the overlap A, so a level squash d carries F = K_l d. The pressure follows the local squash: the centre
+			// of pressure moves with tilt, and the face resists tilt with its tilt rows (k_a times the active part's
+			// second moments about the centre), as a layer face does.
+			// The overlap with each partner face (one, or the coplanar ones of brief 5.2), and its pressed part
+			double whole_A = 0.0;
+			PolyMoments m;
+			thread_local Poly scratch_acts[MAX_PARTNERS];
+			Poly *acts = scratch_acts;
+			int num_acts = 0;
+			for (int i = 0; i < partners.n; ++i) {
+				Poly ov;
+				clip_convex(soft_poly, partners.face[i], ov);
+				if (ov.n < 3) {
+					continue;
+				}
+				make_ccw(ov);
+				whole_A += poly_moments(ov).A;
+				Poly act;
+				clip_halfplane(ov, gx, gy, d0, act);
+				if (act.n >= 3) {
+					const PolyMoments mi = poly_moments(act);
+					m.A += mi.A;
+					m.Sx += mi.Sx;
+					m.Sy += mi.Sy;
+					m.Sxx += mi.Sxx;
+					m.Syy += mi.Syy;
+					m.Sxy += mi.Sxy;
+					acts[num_acts++] = act;
+				}
 			}
-			ax /= overlap.n;
-			ay /= overlap.n;
-			const double dc = d0 + gx * ax + gy * ay;
+			const double ka = whole_A > 0.0 ? soft.lumped_stiffness / whole_A : 0.0;
 			kn = soft.lumped_stiffness;
-			F = MAX(dc, 0.0) * kn;
-			cx = dc > 0.0 ? ax : ddx;
-			cy = dc > 0.0 ? ay : ddy;
 			layer = soft.travel > 0.0 ? soft.travel : 1e6;
-			r_patch.mArea = float(std::abs(signed_area(overlap)));
-			r_patch.mSpinRadius = float(std::sqrt(r_patch.mArea / PI) * 2.0 / 3.0);
-			r_patch.mLawCoefficient = float(kn);
+			r_patch.mArea = float(whole_A);
+			r_patch.mSpinRadius = float(std::sqrt(whole_A / PI) * 2.0 / 3.0);
+			if (num_acts > 0 && ka > 0.0) {
+				const double W = d0 * m.A + gx * m.Sx + gy * m.Sy;
+				if (m.A > 0.0 && W > 0.0) {
+					cx = (d0 * m.Sx + gx * m.Sxx + gy * m.Sxy) / W;
+					cy = (d0 * m.Sy + gx * m.Sxy + gy * m.Syy) / W;
+					F = ka * W;
+					kn = ka * m.A;
+					const double kt_x = ka * (m.Syy - 2.0 * cy * m.Sy + cy * cy * m.A);
+					const double kt_y = ka * (m.Sxx - 2.0 * cx * m.Sx + cx * cx * m.A);
+					const double kt_xy = ka * (m.Sxy - cx * m.Sy - cy * m.Sx + cx * cy * m.A);
+					// The spin radius and the first moments of the pressure, by quadrature over a fan of each active piece
+					double rs = 0.0, m1x = 0.0, m1y = 0.0;
+					for (int j = 0; j < num_acts; ++j) {
+						const Poly &act = acts[j];
+						for (int t = 1; t + 1 < act.n; ++t) {
+							const double x0 = act.x[0], y0 = act.y[0], x1 = act.x[t], y1 = act.y[t], x2 = act.x[t + 1], y2 = act.y[t + 1];
+							const double at = 0.5 * std::abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
+							for (int q = 0; q < 7; ++q) {
+								const double c = 1.0 - TRI_QA[q] - TRI_QB[q];
+								const double px = TRI_QA[q] * x0 + TRI_QB[q] * x1 + c * x2;
+								const double py = TRI_QA[q] * y0 + TRI_QB[q] * y1 + c * y2;
+								const double wq = at * TRI_QW[q] * MAX(d0 + gx * px + gy * py, 0.0);
+								rs += wq * std::sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+								m1x += wq * std::abs(px - cx);
+								m1y += wq * std::abs(py - cy);
+							}
+						}
+					}
+					r_patch.mSpinRadius = float(rs / W);
+					r_patch.mArea = float(m.A);
+					r_result.m1[0] = m1x / W;
+					r_result.m1[1] = m1y / W;
+					// Tilt axes as a layer face's (brief 5.7), the arms to the active part's edge on each side
+					const double tr = 0.5 * (kt_x + kt_y);
+					const double df = 0.5 * (kt_x - kt_y);
+					const double rad = std::sqrt(df * df + kt_xy * kt_xy);
+					const double ev_lo = tr - rad, ev_hi = tr + rad;
+					double ax_x[2], ax_y[2], stiff[2];
+					if (!(ev_hi > 0.0) || (ev_hi - ev_lo) / ev_hi <= 0.10) {
+						ax_x[0] = 1.0;
+						ax_y[0] = 0.0;
+						ax_x[1] = 0.0;
+						ax_y[1] = 1.0;
+						stiff[0] = kt_x;
+						stiff[1] = kt_y;
+					} else {
+						double vx, vy;
+						if (std::abs(kt_xy) > 0.0) {
+							vx = kt_xy;
+							vy = ev_lo - kt_x;
+						} else if (kt_x <= kt_y) {
+							vx = 1.0;
+							vy = 0.0;
+						} else {
+							vx = 0.0;
+							vy = 1.0;
+						}
+						const double vl = std::sqrt(vx * vx + vy * vy);
+						ax_x[0] = vx / vl;
+						ax_y[0] = vy / vl;
+						ax_x[1] = -ax_y[0];
+						ax_y[1] = ax_x[0];
+						stiff[0] = ev_lo;
+						stiff[1] = ev_hi;
+					}
+					r_patch.mNumTilt = 2;
+					for (int i = 0; i < 2; ++i) {
+						r_patch.mTiltAxis[i] = float(ax_x[i]) * t1 + float(ax_y[i]) * t2;
+						r_patch.mTiltStiffness[i] = float(MAX(stiff[i], 0.0));
+						const double mx = -ax_y[i], my = ax_x[i];
+						double pos = 0.0, neg = 0.0;
+						for (int j = 0; j < num_acts; ++j) {
+							for (int k = 0; k < acts[j].n; ++k) {
+								const double s = (acts[j].x[k] - cx) * mx + (acts[j].y[k] - cy) * my;
+								pos = MAX(pos, s);
+								neg = MAX(neg, -s);
+							}
+						}
+						r_patch.mTiltArmPos[i] = float(pos);
+						r_patch.mTiltArmNeg[i] = float(neg);
+					}
+				}
+			}
+			if (!(F > 0.0)) {
+				cx = ddx;
+				cy = ddy;
+			}
+			r_patch.mLawCoefficient = float(soft.lumped_stiffness);
 			r_patch.mLawExponent = 1.0f;
 			r_patch.mNormalDampingRatio = float(loss_side.zeta_for(1.0));
 			r_patch.mRigidStick = true;
@@ -1826,7 +2218,7 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			if (!pressed || onset_pending) {
 				thread_local FaceLaw scratch_ref;
 				FaceLaw *ref = &scratch_ref;
-				if (face_law(soft_poly, partner_poly, 1.0 * share, 0.0, 0.0, co, nullptr, *ref) && !ref->empty) {
+				if (face_law(soft_poly, partners, 1.0 * share, 0.0, 0.0, co, nullptr, *ref) && !ref->empty) {
 					k_ref = ref->k_n * (lubricated_series ? share : table_ratio(false, shape_factor(ref->area, ref->Ixx, ref->Iyy, soft.thickness), mu, kg_of(soft)));
 				}
 			}
@@ -2003,17 +2395,19 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			// UNSOURCED line law (design 2.3): slices along the line
 			const double dy = (yb - ya) / N_SLICES;
 			double F = 0.0, Fy = 0.0, area = 0.0, m1 = 0.0, bmax = 0.0, kn = 0.0;
-			double P[N_SLICES], ys[N_SLICES];
+			double P[N_SLICES], ys[N_SLICES], kslice[N_SLICES];
 			for (int i = 0; i < N_SLICES; ++i) {
 				ys[i] = ya + (i + 0.5) * dy;
 				const double s = s0 + camber * ys[i];
 				P[i] = 0.0;
+				kslice[i] = 0.0;
 				if (s > 0.0) {
 					double b;
 					solid_line_load(s, R, Es, P[i], b);
 					double P2, b2;
 					solid_line_load(s * 1.001, R, Es, P2, b2);
-					kn += (P2 - P[i]) / (0.001 * s) * dy;
+					kslice[i] = (P2 - P[i]) / (0.001 * s);
+					kn += kslice[i] * dy;
 					F += P[i] * dy;
 					Fy += P[i] * ys[i] * dy;
 					area += 2.0 * b * dy;
@@ -2025,9 +2419,22 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				fig.F = F;
 				fig.cy = Fy / F;
 				double rs = 0.0;
+				// The camber stiffness about the rolling direction through the centre, from each slice's stiffness, and
+				// the loaded ends (the tilt row's arms), as the layer table's strip model gives them
+				double ktx = 0.0;
+				bool first = true;
 				for (int i = 0; i < N_SLICES; ++i) {
 					rs += P[i] * std::abs(ys[i] - fig.cy) * dy;
+					ktx += kslice[i] * (ys[i] - fig.cy) * (ys[i] - fig.cy) * dy;
+					if (P[i] > 0.0) {
+						if (first) {
+							fig.y_lo = ys[i] - 0.5 * dy;
+							first = false;
+						}
+						fig.y_hi = ys[i] + 0.5 * dy;
+					}
 				}
+				fig.kt_x = ktx;
 				fig.r_s = rs / F;
 				fig.m1x = m1 / F;
 				fig.area = area;
@@ -2041,25 +2448,67 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			r_patch.mLawExponent = 1.0f;
 		}
 	} else {
-		// Lumped: F = K_l s0 with the class's bed-of-springs profile
+		// Lumped: F = K_l s with the class's bed-of-springs profile. At a point, the squash s0. Along a line, a bed of
+		// springs of K_l / L per length over the loaded length L, each slice at its own squash: camber moves the centre
+		// of pressure, and the line resists it (its camber stiffness and loaded ends feed the tilt row)
 		layer = soft.travel > 0.0 ? soft.travel : 1e6;
-		if (s0 > 0.0) {
-			const double a = std::sqrt(2.0 * R * s0);
-			fig.F = soft.lumped_stiffness * s0;
-			fig.k_n = soft.lumped_stiffness;
-			fig.n_exp = 1.0;
-			fig.sigma = a;
-			if (cls == 2) {
+		if (cls == 2) {
+			if (s0 > 0.0) {
+				const double a = std::sqrt(2.0 * R * s0);
+				fig.F = soft.lumped_stiffness * s0;
+				fig.k_n = soft.lumped_stiffness;
+				fig.n_exp = 1.0;
+				fig.sigma = a;
 				fig.m1x = fig.m1y = 16.0 * a / (15.0 * PI);
 				fig.r_s = 8.0 * a / 15.0;
 				fig.area = PI * a * a;
-			} else {
-				fig.m1x = 3.0 * a / 8.0;
-				fig.r_s = 0.25 * (yb - ya);
-				fig.area = 2.0 * a * (yb - ya);
+				fig.empty = false;
+				have = true;
 			}
-			fig.empty = false;
-			have = true;
+		} else if (d_deep > 0.0) {
+			const double L = yb - ya;
+			const double kl = soft.lumped_stiffness / L;
+			const double dy = L / N_SLICES;
+			double F = 0.0, Fy = 0.0, kn = 0.0, len = 0.0;
+			double P[N_SLICES], ys[N_SLICES];
+			for (int i = 0; i < N_SLICES; ++i) {
+				ys[i] = ya + (i + 0.5) * dy;
+				const double s = s0 + camber * ys[i];
+				P[i] = s > 0.0 ? kl * s : 0.0;
+				if (s > 0.0) {
+					F += P[i] * dy;
+					Fy += P[i] * ys[i] * dy;
+					kn += kl * dy;
+					len += dy;
+				}
+			}
+			if (F > 0.0) {
+				fig.F = F;
+				fig.cy = Fy / F;
+				fig.k_n = kn;
+				double rs = 0.0, ktx = 0.0;
+				bool first = true;
+				for (int i = 0; i < N_SLICES; ++i) {
+					if (P[i] > 0.0) {
+						rs += P[i] * std::abs(ys[i] - fig.cy) * dy;
+						ktx += kl * (ys[i] - fig.cy) * (ys[i] - fig.cy) * dy;
+						if (first) {
+							fig.y_lo = ys[i] - 0.5 * dy;
+							first = false;
+						}
+						fig.y_hi = ys[i] + 0.5 * dy;
+					}
+				}
+				const double a = std::sqrt(2.0 * R * MAX(s0 + camber * fig.cy, 0.0));
+				fig.m1x = 3.0 * a / 8.0;
+				fig.r_s = rs / F;
+				fig.kt_x = ktx;
+				fig.area = 2.0 * a * len;
+				fig.sigma = a;
+				fig.n_exp = 1.0;
+				fig.empty = false;
+				have = true;
+			}
 		}
 		r_patch.mLawCoefficient = float(soft.lumped_stiffness);
 		r_patch.mLawExponent = 1.0f;
