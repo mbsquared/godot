@@ -428,6 +428,7 @@ public:
 	// Synchronous (push_and_ret): the caller needs the minted RID immediately, same as the FUNCRID creators.
 	FUNC5R(RID, gear_joint_create, RID, const Vector3 &, RID, const Vector3 &, double)
 	FUNC7R(RID, velocity_gear_joint_create, RID, const Vector3 &, RID, const Vector3 &, RID, const Vector3 &, const Vector3 &)
+	FUNC2(velocity_gear_joint_set_phase_hold, RID, bool)
 
 	FUNC1(joint_clear, RID)
 

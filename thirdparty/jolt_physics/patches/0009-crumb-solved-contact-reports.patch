@@ -1,12 +1,13 @@
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h b/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
-index 07dacf3a5f..53d9bb5f96 100644
+index 07dacf3a5f..73cd684556 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
 +++ b/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
-@@ -49,6 +49,24 @@ public:
+@@ -49,6 +49,28 @@ public:
  	bool					mIsSensor;							///< If the contact should be treated as a sensor vs body contact (no collision response)
  	Vec3					mRelativeLinearSurfaceVelocity = Vec3::sZero(); ///< Relative linear surface velocity between the bodies (world space surface velocity of body 2 - world space surface velocity of body 1), can be used to create a conveyor belt effect
  	Vec3					mRelativeAngularSurfaceVelocity = Vec3::sZero(); ///< Relative angular surface velocity between the bodies (world space angular surface velocity of body 2 - world space angular surface velocity of body 1). Note that this angular velocity is relative to the center of mass of body 1, so if you want it relative to body 2's center of mass you need to add body 2 angular velocity x (body 1 world space center of mass - body 2 world space center of mass) to mRelativeLinearSurfaceVelocity.
-+	// CRUMB: ask for ContactListener::OnContactSolved on this manifold after the velocity solve. It
++	// CRUMB: ask for ContactListener::OnContactSolved on this manifold after the velocity solve, and
++	// on a hit the sweep path (continuous collision detection) resolves with these settings. It
 +	// changes nothing the solver does.
 +	bool					mReportSolved = false;
 +};
@@ -14,7 +15,9 @@ index 07dacf3a5f..53d9bb5f96 100644
 +// CRUMB: what the solver applied to one manifold over the step, on body 2 (body 1 takes the opposite).
 +// Built after the velocity iterations from the total impulses, so it is what the bodies felt, not an
 +// estimate made before the solve. Positions are not integrated yet when it is built, so the bodies
-+// are where the solve saw them.
++// are where the solve saw them. A hit the sweep path resolves is reported the same way, right after
++// it applies its impulses: one point, at the hit, with mBody1Offset saying how far into the step the
++// swept body (body 1) had travelled when it was struck.
 +struct ContactSolvedReport
 +{
 +	Vec3					mWorldNormal;						// From body 1 to body 2
@@ -24,17 +27,20 @@ index 07dacf3a5f..53d9bb5f96 100644
 +	float					mNormalImpulse;						// Sum of the pressing impulses, never negative
 +	float					mArea;								// A soft patch's contact area, 0 for a rigid manifold
 +	float					mFrictionUse;						// 0 to 1: the friction impulses' magnitudes over their limit, summed over the points (1 = sliding)
++	Vec3					mBody1Offset = Vec3::sZero();		// Body 1's centre of mass when the impulses were applied, less where it is now: zero after the velocity solve, the travel to the hit on the sweep path
  };
  
  /// Return value for the OnContactValidate callback. Determines if the contact is being processed or not.
-@@ -138,6 +156,11 @@ public:
+@@ -138,6 +160,13 @@ public:
  	/// the sub shape ID may not be valid / may not point to the same sub shape anymore.
  	/// If you want to know if this is the last contact between the two bodies, use PhysicsSystem::WereBodiesInContact.
  	virtual void			OnContactRemoved([[maybe_unused]] const SubShapeIDPair &inSubShapePair) { /* Do nothing */ }
 +
 +	// CRUMB: called after the velocity solve for every manifold whose settings asked for it
-+	// (ContactSettings::mReportSolved), with what the solver applied over the step. Called from the
-+	// solver with the bodies locked, like OnContactAdded: read only. Body 1 and 2 are the constraint's.
++	// (ContactSettings::mReportSolved), with what the solver applied over the step, and after every hit
++	// the sweep path resolves for a contact whose settings asked for it, with what that hit applied.
++	// Called from the solver with the bodies locked, like OnContactAdded: read only. Body 1 and 2 are
++	// the constraint's; on the sweep path body 1 is the body that swept.
 +	virtual void			OnContactSolved([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, [[maybe_unused]] const SubShapeIDPair &inSubShapePair, [[maybe_unused]] const ContactSolvedReport &inReport) { /* Do nothing */ }
  };
  
@@ -157,3 +163,81 @@ index 73e5d749b0..cbdc1b5700 100644
  public:
  	/// The maximum value that can be passed to Init for inMaxContactConstraints. Note you should really use a lower value, using this value will cost a lot of memory!
  	static constexpr uint		cMaxContactConstraintsLimit = ~uint(0) / sizeof(ContactConstraint);
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
+index d4618a750a..59e030325c 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
++++ b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
+@@ -1801,6 +1801,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
+ 							// This is the earliest hit so far, store it
+ 							mCCDBody.mContactNormal = normal;
+ 							mCCDBody.mBodyID2 = inResult.mBodyID2;
++							mCCDBody.mSubShapeID1 = inResult.mSubShapeID1; // CRUMB: for the solved-contact report
+ 							mCCDBody.mSubShapeID2 = inResult.mSubShapeID2;
+ 							mCCDBody.mFraction = fraction;
+ 							mCCDBody.mFractionPlusSlop = fraction_plus_slop;
+@@ -1982,6 +1983,29 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
+ 	sFinalizeContactAllocator(*ioStep, contact_allocator);
+ }
+ 
++// CRUMB: report what a hit on the sweep path applied, as ContactConstraintManager::ReportSolvedContact
++// does for the velocity solve: one point at the hit, the impulses on body 2 (body 1, the body that swept,
++// takes the opposite). The normal impulse is reported as applied (the sweep does not clamp it at zero);
++// only its pressing part counts as the normal impulse. Body 1 moves to the hit only after this, so the
++// report says where it was when it was struck.
++static void sReportSolvedCCDContact(ContactListener &ioListener, const Body &inBody1, const Body &inBody2, const PhysicsUpdateContext::Step::CCDBody &inCCDBody, float inNormalLambda, Vec3Arg inFrictionImpulse)
++{
++	ContactSolvedReport report;
++	report.mWorldNormal = inCCDBody.mContactNormal;
++	report.mCentre = inCCDBody.mContactPointOn2;
++	report.mLinearImpulse = inNormalLambda * inCCDBody.mContactNormal + inFrictionImpulse;
++	report.mAngularImpulse = Vec3::sZero();
++	report.mNormalImpulse = max(inNormalLambda, 0.0f);
++	report.mArea = 0.0f;
++	float friction = inFrictionImpulse.Length();
++	float limit = inCCDBody.mContactSettings.mCombinedFriction * report.mNormalImpulse;
++	report.mFrictionUse = limit > 0.0f? min(friction / limit, 1.0f) : (friction > 0.0f? 1.0f : 0.0f);
++	report.mBody1Offset = inCCDBody.mFraction * inCCDBody.mDeltaPosition;
++
++	SubShapeIDPair pair(inBody1.GetID(), inCCDBody.mSubShapeID1, inBody2.GetID(), inCCDBody.mSubShapeID2);
++	ioListener.OnContactSolved(inBody1, inBody2, pair, report);
++}
++
+ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
+ {
+ #ifdef JPH_ENABLE_ASSERTS
+@@ -2102,6 +2126,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
+ 						contact_constraint.SolveVelocityConstraintWithMassOverride(body1, inv_m1, body2, inv_m2, ccd_body->mContactNormal, -FLT_MAX, FLT_MAX);
+ 
+ 						// Apply friction
++						Vec3 friction_impulse = Vec3::sZero(); // CRUMB: for the solved-contact report
+ 						if (contact_settings.mCombinedFriction > 0.0f)
+ 						{
+ 							// Calculate friction direction by removing normal velocity from the relative velocity
+@@ -2118,9 +2143,15 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
+ 								AxisConstraintPart friction;
+ 								friction.CalculateConstraintPropertiesWithMassOverride(body1, inv_m1, contact_settings.mInvInertiaScale1, r1_plus_u, body2, inv_m2, contact_settings.mInvInertiaScale2, r2, friction_direction);
+ 								friction.SolveVelocityConstraintWithMassOverride(body1, inv_m1, body2, inv_m2, friction_direction, -max_lambda_f, max_lambda_f);
++								friction_impulse = friction.GetTotalLambda() * friction_direction; // CRUMB
+ 							}
+ 						}
+ 
++						// CRUMB: report what this hit applied, for a contact whose settings asked for it
++						ContactListener *listener = mContactManager.GetContactListener();
++						if (contact_settings.mReportSolved && listener != nullptr)
++							sReportSolvedCCDContact(*listener, body1, body2, *ccd_body, contact_constraint.GetTotalLambda(), friction_impulse);
++
+ 						// Clamp velocity of body 2
+ 						if (body2.IsDynamic())
+ 						{
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/PhysicsUpdateContext.h b/thirdparty/jolt_physics/Jolt/Physics/PhysicsUpdateContext.h
+index fe99c46ccc..3c48efb259 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/PhysicsUpdateContext.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/PhysicsUpdateContext.h
+@@ -102,6 +102,7 @@ public:
+ 			RVec3			mContactPointOn2;										///< World space contact point on body 2 of closest hit (only valid if mFractionPlusSlop < 1)
+ 			BodyID			mBodyID1;												///< Body 1 (the body that is performing collision detection)
+ 			BodyID			mBodyID2;												///< Body 2 (the body of the closest hit, only valid if mFractionPlusSlop < 1)
++			SubShapeID		mSubShapeID1;											// CRUMB: sub shape of body 1 that hit (only valid if mFractionPlusSlop < 1), for the solved-contact report
+ 			SubShapeID		mSubShapeID2;											///< Sub shape of body 2 that was hit (only valid if mFractionPlusSlop < 1)
+ 			float			mFraction = 1.0f;										///< Fraction at which the hit occurred
+ 			float			mFractionPlusSlop = 1.0f;								///< Fraction at which the hit occurred + extra delta to allow body to penetrate by mMaxPenetration

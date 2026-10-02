@@ -74,11 +74,13 @@ void JoltContactListener3D::OnContactRemoved(const JPH::SubShapeIDPair &p_shape_
 	}
 }
 
-// CRUMB: what the solver applied to a manifold one of whose bodies tracks its contact forces. Body 2
-// takes the report and body 1 its opposite, each on the shape the manifold is on, with the moment
-// carried from the report's centre to that body's centre of mass. The bodies have not moved since the
-// solve. A dynamic body that a one-sided collision left unpushed (its inverse mass scaled to zero in
-// _try_override_collision_response) took nothing, so it is given nothing.
+// CRUMB: what the solver applied to a manifold one of whose bodies tracks its contact forces, after the
+// velocity solve or for a hit the sweep path resolved. Body 2 takes the report and body 1 its opposite,
+// each on the shape the manifold is on, with the moment carried from the report's centre to that
+// body's centre of mass where it was when the impulses were applied: body 2 has not moved since, and
+// body 1 is mBody1Offset short of it (nonzero only on the sweep path, where body 1 is moved to the hit
+// after the report). A dynamic body that a one-sided collision left unpushed (its inverse mass scaled
+// to zero in _try_override_collision_response) took nothing, so it is given nothing.
 void JoltContactListener3D::OnContactSolved(const JPH::Body &p_jolt_body1, const JPH::Body &p_jolt_body2, const JPH::SubShapeIDPair &p_shape_pair, const JPH::ContactSolvedReport &p_report) {
 	JoltBody3D *body1 = reinterpret_cast<JoltBody3D *>(p_jolt_body1.GetUserData());
 	JoltBody3D *body2 = reinterpret_cast<JoltBody3D *>(p_jolt_body2.GetUserData());
@@ -112,7 +114,7 @@ void JoltContactListener3D::OnContactSolved(const JPH::Body &p_jolt_body1, const
 	}
 
 	if (takes1) {
-		const Vector3 arm = centre - to_godot(p_jolt_body1.GetCenterOfMassPosition());
+		const Vector3 arm = centre - (to_godot(p_jolt_body1.GetCenterOfMassPosition()) + to_godot(p_report.mBody1Offset));
 		body1->add_solved_contact(p_jolt_body1, p_shape_pair.GetSubShapeID1(), serial, -impulse, -moment - arm.cross(impulse), p_report.mNormalImpulse, centre, p_report.mArea, p_report.mFrictionUse);
 	}
 }
@@ -223,6 +225,11 @@ bool JoltContactListener3D::_try_apply_surface_velocities(const JPH::Body &p_jol
 // contact forces. Nothing else changes: the manifold, its reduction and the solve are as they were.
 bool JoltContactListener3D::_try_request_solved_report(const JPH::Body &p_jolt_body1, const JPH::Body &p_jolt_body2, JPH::ContactSettings &p_settings) {
 	if (p_jolt_body1.IsSensor() || p_jolt_body2.IsSensor()) {
+		return false;
+	}
+
+	// The sweep path also asks for a hit on a soft body; only rigid bodies track.
+	if (!p_jolt_body1.IsRigidBody() || !p_jolt_body2.IsRigidBody()) {
 		return false;
 	}
 

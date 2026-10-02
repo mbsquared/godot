@@ -525,7 +525,11 @@ public:
 	// force is the pressing part alone, never negative; the point is the centre of pressure in world
 	// space (zero out of contact); the area is a soft patch's, 0 for rigid contacts; the friction use
 	// is 0 to 1, 1 sliding. Tracking must be switched on first and changes no physics. Zero before the
-	// first step and for shapes nothing touched in the last step.
+	// first step and for shapes nothing touched in the last step. A hit that continuous collision
+	// detection resolves (a fast or thin body's sweep) is read too, as one point at the hit. The reads
+	// assume single-threaded physics (simulation/single_threaded, as CRUMB runs it): with worker threads
+	// they stay safe, but contacts of different islands on one shape are summed in the order the islands
+	// finish, so the last bits of a read can differ from run to run.
 	virtual void body_set_contact_force_tracking(RID p_body, bool p_enable) {}
 	virtual Vector3 body_get_contact_force(RID p_body, int p_first_shape, int p_shape_count) const { return Vector3(); }
 	virtual Vector3 body_get_contact_torque(RID p_body, int p_first_shape, int p_shape_count) const { return Vector3(); }
@@ -805,6 +809,12 @@ public:
 	// Axes are in each body's own frame. An empty p_body_c gives the two-body form. Solved inside the
 	// step with the other constraints; it mints its own RID like gear_joint_create.
 	virtual RID velocity_gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, RID p_body_c, const Vector3 &p_axis_c, const Vector3 &p_coefficients) { return RID(); }
+	// CRUMB: an opt-in phase hold on such a relation, for a mesh whose phase matters (teeth on a frame
+	// that turns): the same relation on the bodies' turns about their axes since the joint was made,
+	// each measured relative to the third body, held at zero in the position step. Only the signature
+	// is in this engine build: the default does nothing, so every relation stays velocity only until a
+	// build that holds the phase overrides it.
+	virtual void velocity_gear_joint_set_phase_hold(RID p_joint, bool p_enable) {}
 
 	virtual void hinge_joint_set_param(RID p_joint, HingeJointParam p_param, real_t p_value) = 0;
 	virtual real_t hinge_joint_get_param(RID p_joint, HingeJointParam p_param) const = 0;

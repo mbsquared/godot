@@ -1014,6 +1014,7 @@ void PhysicsServer3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("gear_joint_create", "body_a", "axis_a", "body_b", "axis_b", "ratio"), &PhysicsServer3D::gear_joint_create);
 	ClassDB::bind_method(D_METHOD("velocity_gear_joint_create", "body_a", "axis_a", "body_b", "axis_b", "body_c", "axis_c", "coefficients"), &PhysicsServer3D::velocity_gear_joint_create);
+	ClassDB::bind_method(D_METHOD("velocity_gear_joint_set_phase_hold", "joint", "enable"), &PhysicsServer3D::velocity_gear_joint_set_phase_hold);
 
 	// CRUMB free-running physics thread.
 	ClassDB::bind_method(D_METHOD("is_free_running"), &PhysicsServer3D::is_free_running);

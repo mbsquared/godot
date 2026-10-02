@@ -1801,6 +1801,7 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 							// This is the earliest hit so far, store it
 							mCCDBody.mContactNormal = normal;
 							mCCDBody.mBodyID2 = inResult.mBodyID2;
+							mCCDBody.mSubShapeID1 = inResult.mSubShapeID1; // CRUMB: for the solved-contact report
 							mCCDBody.mSubShapeID2 = inResult.mSubShapeID2;
 							mCCDBody.mFraction = fraction;
 							mCCDBody.mFractionPlusSlop = fraction_plus_slop;
@@ -1982,6 +1983,29 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 	sFinalizeContactAllocator(*ioStep, contact_allocator);
 }
 
+// CRUMB: report what a hit on the sweep path applied, as ContactConstraintManager::ReportSolvedContact
+// does for the velocity solve: one point at the hit, the impulses on body 2 (body 1, the body that swept,
+// takes the opposite). The normal impulse is reported as applied (the sweep does not clamp it at zero);
+// only its pressing part counts as the normal impulse. Body 1 moves to the hit only after this, so the
+// report says where it was when it was struck.
+static void sReportSolvedCCDContact(ContactListener &ioListener, const Body &inBody1, const Body &inBody2, const PhysicsUpdateContext::Step::CCDBody &inCCDBody, float inNormalLambda, Vec3Arg inFrictionImpulse)
+{
+	ContactSolvedReport report;
+	report.mWorldNormal = inCCDBody.mContactNormal;
+	report.mCentre = inCCDBody.mContactPointOn2;
+	report.mLinearImpulse = inNormalLambda * inCCDBody.mContactNormal + inFrictionImpulse;
+	report.mAngularImpulse = Vec3::sZero();
+	report.mNormalImpulse = max(inNormalLambda, 0.0f);
+	report.mArea = 0.0f;
+	float friction = inFrictionImpulse.Length();
+	float limit = inCCDBody.mContactSettings.mCombinedFriction * report.mNormalImpulse;
+	report.mFrictionUse = limit > 0.0f? min(friction / limit, 1.0f) : (friction > 0.0f? 1.0f : 0.0f);
+	report.mBody1Offset = inCCDBody.mFraction * inCCDBody.mDeltaPosition;
+
+	SubShapeIDPair pair(inBody1.GetID(), inCCDBody.mSubShapeID1, inBody2.GetID(), inCCDBody.mSubShapeID2);
+	ioListener.OnContactSolved(inBody1, inBody2, pair, report);
+}
+
 void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
 {
 #ifdef JPH_ENABLE_ASSERTS
@@ -2102,6 +2126,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 						contact_constraint.SolveVelocityConstraintWithMassOverride(body1, inv_m1, body2, inv_m2, ccd_body->mContactNormal, -FLT_MAX, FLT_MAX);
 
 						// Apply friction
+						Vec3 friction_impulse = Vec3::sZero(); // CRUMB: for the solved-contact report
 						if (contact_settings.mCombinedFriction > 0.0f)
 						{
 							// Calculate friction direction by removing normal velocity from the relative velocity
@@ -2118,8 +2143,14 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 								AxisConstraintPart friction;
 								friction.CalculateConstraintPropertiesWithMassOverride(body1, inv_m1, contact_settings.mInvInertiaScale1, r1_plus_u, body2, inv_m2, contact_settings.mInvInertiaScale2, r2, friction_direction);
 								friction.SolveVelocityConstraintWithMassOverride(body1, inv_m1, body2, inv_m2, friction_direction, -max_lambda_f, max_lambda_f);
+								friction_impulse = friction.GetTotalLambda() * friction_direction; // CRUMB
 							}
 						}
+
+						// CRUMB: report what this hit applied, for a contact whose settings asked for it
+						ContactListener *listener = mContactManager.GetContactListener();
+						if (contact_settings.mReportSolved && listener != nullptr)
+							sReportSolvedCCDContact(*listener, body1, body2, *ccd_body, contact_constraint.GetTotalLambda(), friction_impulse);
 
 						// Clamp velocity of body 2
 						if (body2.IsDynamic())

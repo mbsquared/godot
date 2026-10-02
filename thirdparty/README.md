@@ -511,7 +511,7 @@ Patches:
 - `0006-backport-upstream-commit-365a15367.patch` ([GH-115305](https://github.com/godotengine/godot/pull/115305))
 - `0007-backport-upstream-commit-e0a6a9a16.patch` ([GH-115327](https://github.com/godotengine/godot/pull/115327))
 - `0008-crumb-six-dof-world-space-impulses.patch` (CRUMB fork: a 6DOF constraint's last impulses as world vectors, for joint reactions)
-- `0009-crumb-solved-contact-reports.patch` (CRUMB fork: a contact listener callback with the impulses the solver applied to each manifold that asks, for contact-force reads)
+- `0009-crumb-solved-contact-reports.patch` (CRUMB fork: a contact listener callback with the impulses the solver applied to each manifold that asks, after the velocity solve and for each hit the sweep path resolves, for contact-force reads; the reads assume single-threaded physics, `simulation/single_threaded`, as CRUMB runs it: threaded they stay safe under the listener's lock but sum in the order islands finish, so their last bits can vary between runs)
 - `0011-crumb-gear-ratio-on-body-two.patch` (CRUMB fork: the gear constraint applies its ratio to body 2's impulse, so a geared pair multiplies torque and conserves momentum; 0010 is reserved for the compliant contact patch)
 
 
