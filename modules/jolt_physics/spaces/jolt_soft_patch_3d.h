@@ -45,14 +45,22 @@
 // allocation: the same inputs give the same bits.
 //
 // The laws:
-// - Layer, Face: the split law (p = (E/h) d + q, lam2 q - lap q = kI d, q = 0 at free edges) with the contact set
-//   found by complementarity on a grid extended one layer depth beyond the overlap, banded Cholesky, active-set
-//   passes from the tail's set, Richardson on the half grid, scaled by the layer table's T3 at the pair's static mu.
-//   The law carries the bulk modulus itself (the compressible pad equation), so no separate compressibility term.
+// - Layer, Face against a partner that is not a Layer: the face law v2 (Stage 1c-b desk A, DESK_A.md 6): the layer's
+//   film flow in conservative form on a tensor grid of cells (at most 0.35 depth across over the contactable region,
+//   graded beyond it to a free layer four depths out, at most 1024 cells, its axes along the region's longest edge),
+//   the contact set by complementarity, two fields (a frictionless face and the physical no-slip face, which holds each
+//   point where it touched), the FE's edge multipliers cell by cell from the nearest free face and indenter edge, and
+//   the Coulomb face as the FE's own friction share of the two fields (spaces/soft_layer_table/
+//   jolt_soft_face_table.gen.h, its constants checked at compile time). Active-set passes from the tail's two sets,
+//   banded Cholesky. A partner edge within 1e-3 depth of the layer's own edge is that free face (an exact coincidence
+//   and a float's noise either side read alike); coplanar partner faces press as their union. The law carries the
+//   bulk modulus itself (the compressible pad equation), so no separate compressibility term.
 // - Layer, Line and Point: the layer table (spaces/soft_layer_table/jolt_soft_layer_table.gen.h, TABLE_FORMAT.v2):
-//   a strip model of slices along a line, the axisymmetric figures at a point; outside the table, the split law on
-//   the grid (counted).
-// - Two Layer faces: each side's layer with a lubricated face, compliances in series (the lead's decision 5).
+//   a strip model of slices along a line, the axisymmetric figures at a point; outside the table, the split law (p =
+//   (E/h) d + q, lam2 q - lap q = kI d, q = 0 at free edges) on a grid one depth beyond the contact with Richardson on
+//   the half grid and T3 at the pair's static mu (counted).
+// - Two Layer faces: the split law with the contact set by complementarity, each side's layer with a lubricated face,
+//   compliances in series (the lead's decision 5).
 // - Two Layer sides on a Line or a Point: the two-sided design's law (design 4.6: the softer side's split law with the
 //   layers' local terms in series) on the grid, counted as outside the table. A disclosed restriction: the lubricated
 //   series of decision 5 is not read for curved patches, since the table holds one layer's figures and a series of two

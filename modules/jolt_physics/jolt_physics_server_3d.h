@@ -290,11 +290,12 @@ public:
 	// array otherwise), 40 floats in solver units: [0] class (0 face, 1 line, 2 point), [1] kind,
 	// [2] force, [3] squash at the deepest point, [4] normal stiffness, [5..7] centre of pressure, [8..10] normal (body
 	// 1 to body 2), [11, 12] tilt stiffnesses, [13] spin radius, [14, 15] rolling arms, [16] area, [17, 18] the field's
-	// first moments along the tangents, [19] static and [20] sliding friction, [21] the face condition's ratio (T3),
-	// [22] outside the table (1), [23] active-set passes, [24] contact set settled (1), [25] shear and [26] spin
-	// stiffness, [27] restitution, [28, 29] the first-touch law's coefficient and exponent, [30..32] tangent 1, [33]
-	// the force before the face ratio, [34] layer left before the cores meet, [35..37] the deepest point, [38] the
-	// relaxation length, [39] rigid stick (1).
+	// first moments along the tangents, [19] static and [20] sliding friction, [21] the face condition: the ratio
+	// applied (T3), or for a Layer face against a partner that is not a Layer the face law v2's friction share Phi (no
+	// ratio applied), [22] outside the table (1), [23] active-set passes, [24] contact set settled (1), [25] shear and
+	// [26] spin stiffness, [27] restitution, [28, 29] the first-touch law's coefficient and exponent, [30..32] tangent 1,
+	// [33] the force before the face ratio (the force itself for the face law v2), [34] layer left before the cores
+	// meet, [35..37] the deepest point, [38] the relaxation length, [39] rigid stick (1).
 	virtual bool soft_surfaces_available() const override;
 	virtual void body_set_shape_soft_surface(RID p_body, int p_shape_idx, const PackedFloat32Array &p_params) override;
 	virtual PackedInt32Array space_get_soft_contact_stats(RID p_space) const override;
