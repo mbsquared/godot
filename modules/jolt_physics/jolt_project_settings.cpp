@@ -60,6 +60,9 @@ void JoltProjectSettings::register_settings() {
 	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "physics/jolt_physics_3d/simulation/body_pair_contact_cache_enabled"), true);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "physics/jolt_physics_3d/simulation/body_pair_contact_cache_distance_threshold", PROPERTY_HINT_RANGE, U"0,0.01,0.00001,or_greater,suffix:m"), 0.001f);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "physics/jolt_physics_3d/simulation/body_pair_contact_cache_angle_threshold", PROPERTY_HINT_RANGE, U"0,180,0.01,radians_as_degrees"), Math::deg_to_rad(2.0f));
+	// CRUMB: how far a contact point may move on both bodies between steps and still start from last step's impulses
+	// (the warm start). The default is Jolt's own 0.01, sized for metres; a world in millimetres sets its own.
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "physics/jolt_physics_3d/simulation/contact_point_preserve_lambda_max_distance", PROPERTY_HINT_RANGE, U"0,1,0.00001,or_greater,suffix:m"), 0.01f);
 
 	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "physics/jolt_physics_3d/queries/use_enhanced_internal_edge_removal"), false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::BOOL, "physics/jolt_physics_3d/queries/enable_ray_cast_face_index"), false);
@@ -117,6 +120,8 @@ void JoltProjectSettings::read_settings() {
 	body_pair_cache_distance_sq = body_pair_cache_distance * body_pair_cache_distance;
 	float body_pair_cache_angle = GLOBAL_GET("physics/jolt_physics_3d/simulation/body_pair_contact_cache_angle_threshold");
 	body_pair_cache_angle_cos_div2 = Math::cos(body_pair_cache_angle / 2.0f);
+	float preserve_lambda_distance = GLOBAL_GET("physics/jolt_physics_3d/simulation/contact_point_preserve_lambda_max_distance");
+	contact_point_preserve_lambda_max_distance_sq = preserve_lambda_distance * preserve_lambda_distance;
 
 	use_enhanced_internal_edge_removal_for_queries = GLOBAL_GET("physics/jolt_physics_3d/queries/use_enhanced_internal_edge_removal");
 	enable_ray_cast_face_index = GLOBAL_GET("physics/jolt_physics_3d/queries/enable_ray_cast_face_index");

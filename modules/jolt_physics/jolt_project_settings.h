@@ -75,6 +75,7 @@ public:
 	inline static bool body_pair_contact_cache_enabled;
 	inline static float body_pair_cache_distance_sq;
 	inline static float body_pair_cache_angle_cos_div2;
+	inline static float contact_point_preserve_lambda_max_distance_sq; // CRUMB
 
 	inline static bool use_enhanced_internal_edge_removal_for_queries;
 	inline static bool enable_ray_cast_face_index;

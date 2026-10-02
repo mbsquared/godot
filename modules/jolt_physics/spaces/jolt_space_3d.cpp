@@ -151,6 +151,7 @@ void JoltSpace3D::_init_physics_system() {
 	settings.mPointVelocitySleepThreshold = JoltProjectSettings::sleep_velocity_threshold;
 	settings.mUseBodyPairContactCache = JoltProjectSettings::body_pair_contact_cache_enabled;
 	settings.mAllowSleeping = JoltProjectSettings::sleep_allowed;
+	settings.mContactPointPreserveLambdaMaxDistSq = JoltProjectSettings::contact_point_preserve_lambda_max_distance_sq; // CRUMB
 
 	physics_system->SetPhysicsSettings(settings);
 	physics_system->SetGravity(JPH::Vec3::sZero());
@@ -329,12 +330,16 @@ void JoltSpace3D::step(float p_step) {
 			baumgarte = CLAMP(baumgarte, 0.0f, 1.0f);
 		}
 
+		// CRUMB: and the warm start's contact-point radius, live like the step counts
+		const float preserve_lambda_sq = JoltProjectSettings::contact_point_preserve_lambda_max_distance_sq;
+
 		if (current.mNumVelocitySteps != velocity_steps || current.mNumPositionSteps != position_steps ||
-				!Math::is_equal_approx(current.mBaumgarte, baumgarte)) {
+				!Math::is_equal_approx(current.mBaumgarte, baumgarte) || current.mContactPointPreserveLambdaMaxDistSq != preserve_lambda_sq) {
 			JPH::PhysicsSettings updated = current;
 			updated.mNumVelocitySteps = velocity_steps;
 			updated.mNumPositionSteps = position_steps;
 			updated.mBaumgarte = baumgarte;
+			updated.mContactPointPreserveLambdaMaxDistSq = preserve_lambda_sq;
 			physics_system->SetPhysicsSettings(updated);
 		}
 	}
