@@ -1647,6 +1647,71 @@ double rolling_arm(double p_m1, double p_loss, double p_additive) {
 	return 0.5 * p_loss * p_m1 + p_additive;
 }
 
+// The first-touch law the solver reads (SoftContactPatch::mLawSquash, mLawForce): the patch's own pressed law sampled at
+// p_n squashes log-spaced from p_lo to p_hi, read piecewise between them, so a first touch's predicted peak and a gap
+// row's secant come from the law itself, not from one power law extrapolated across decades of squash. p_fn(s, F) gives
+// the law's force at the squash s, or false where it cannot be read. With p_all, one sample that cannot be read leaves
+// none (the caller falls back to another law); otherwise such a sample is left out. Returns the samples kept.
+template <class Fn>
+int set_law_samples(double p_lo, double p_hi, int p_n, bool p_all, Fn p_fn, JPH::SoftContactPatch &r_patch) {
+	r_patch.mNumLawPoints = 0;
+	const int n = MIN(p_n, (int)JPH::SoftContactPatch::cMaxLawPoints);
+	if (!(p_lo > 0.0) || !(p_hi > p_lo) || n < 2) {
+		return 0;
+	}
+	int kept = 0;
+	for (int k = 0; k < n; ++k) {
+		const double s = p_lo * std::pow(p_hi / p_lo, double(k) / double(n - 1));
+		double F = 0.0;
+		const bool ok = p_fn(s, F) && std::isfinite(F) && F > 0.0 && (kept == 0 || F > double(r_patch.mLawForce[kept - 1]));
+		if (!ok) {
+			if (p_all) {
+				r_patch.mNumLawPoints = 0;
+				return 0;
+			}
+			continue;
+		}
+		r_patch.mLawSquash[kept] = float(s);
+		r_patch.mLawForce[kept] = float(F);
+		++kept;
+	}
+	r_patch.mNumLawPoints = uint8_t(kept >= 2 ? kept : 0);
+	return r_patch.mNumLawPoints;
+}
+
+// A linear law F = k s as the solver's two samples (exact at any squash)
+void set_law_linear(double p_k, double p_scale, JPH::SoftContactPatch &r_patch) {
+	r_patch.mNumLawPoints = 0;
+	if (!(p_k > 0.0) || !(p_scale > 0.0)) {
+		return;
+	}
+	r_patch.mLawSquash[0] = float(1e-3 * p_scale);
+	r_patch.mLawForce[0] = float(p_k * 1e-3 * p_scale);
+	r_patch.mLawSquash[1] = float(p_scale);
+	r_patch.mLawForce[1] = float(p_k * p_scale);
+	r_patch.mNumLawPoints = 2;
+}
+
+// The core guard's points of a face patch (brief 5.5, Stage 1c-b): every vertex of the overlap, at most the tail's room of
+// them, spread evenly round it when there are more; each with the overlap of the undeformed surfaces there and the layer
+// left before the cores meet
+template <class World>
+void set_face_cores(const Poly &p_overlap, double p_d0, double p_gx, double p_gy, double p_layer, World p_world, JPH::SoftContactPatch &r_patch) {
+	const int room = JPH::SoftContactTail::cMaxCores;
+	const int n = p_overlap.n;
+	const int count = MIN(n, room);
+	r_patch.mNumCores = 0;
+	for (int i = 0; i < count; ++i) {
+		const int k = n <= room ? i : (i * n) / room;
+		const double x = p_overlap.x[k], y = p_overlap.y[k];
+		const double d = p_d0 + p_gx * x + p_gy * y;
+		r_patch.mCorePoint[i] = p_world(x, y);
+		r_patch.mCoreSquash[i] = float(d);
+		r_patch.mCoreGapAt[i] = float(p_layer - d);
+	}
+	r_patch.mNumCores = uint8_t(count);
+}
+
 } // namespace
 
 bool JoltSoftSurface3D::from_params(const PackedFloat32Array &p_params, JoltSoftSurface3D &r_surface, String &r_error) {
@@ -1755,6 +1820,11 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	const JoltSoftSurface3D &loss_side = lossier(s1, s2);
 	r_patch.mRestitution = float(loss_side.restitution);
 	r_patch.mDampingRatio = float(loss_side.zeta[0]);
+	for (int i = 0; i < 3; ++i) {
+		r_patch.mLawDampingRatio[i] = float(loss_side.zeta[i]);
+	}
+	// The first-touch law is read only for a first touch still to be decided and for a patch across a gap (Stage 1c-b)
+	const bool onset_pending = p_in.tail == nullptr || (p_in.tail->mFlags & JPH::SoftContactTail::OnsetPending) != 0;
 	r_patch.mStaticFriction = p_in.static_friction;
 	r_patch.mSlidingFriction = MIN(p_in.sliding_friction, p_in.static_friction);
 	const double additive_arm = (s1 != nullptr ? s1->rolling_arm : 0.0) + (s2 != nullptr ? s2->rolling_arm : 0.0);
@@ -1898,6 +1968,7 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			r_patch.mSlidingFriction = 0.0f;
 			r_patch.mCentre = r_patch.mDeepest;
 			r_patch.mCoreGap = float(follower_layer - dmax);
+			set_face_cores(overlap, d0, gx, gy, follower_layer, world, r_patch);
 			r_patch.mNumTilt = 0;
 			r_patch.mNumRoll = 0;
 			r_patch.mRigidStick = true;
@@ -2118,6 +2189,9 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			}
 			r_patch.mLawCoefficient = float(soft.lumped_stiffness);
 			r_patch.mLawExponent = 1.0f;
+			if (onset_pending || !(F > 0.0)) {
+				set_law_linear(soft.lumped_stiffness, MIN(layer, 1.0), r_patch);
+			}
 			r_patch.mNormalDampingRatio = float(loss_side.zeta_for(1.0));
 			r_patch.mRigidStick = true;
 		} else if (pressed) {
@@ -2213,7 +2287,6 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		if (soft.kind == JoltSoftSurface3D::KIND_LAYER) {
 			// The law for a first touch and across a gap: the normal stiffness of the footprints in full contact. Only a
 			// gap or an undecided first touch needs it; a pressed patch whose first touch is decided keeps its own.
-			const bool onset_pending = p_in.tail == nullptr || (p_in.tail->mFlags & JPH::SoftContactTail::OnsetPending) != 0;
 			double k_ref = kn;
 			if (!pressed || onset_pending) {
 				thread_local FaceLaw scratch_ref;
@@ -2221,6 +2294,7 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				if (face_law(soft_poly, partners, 1.0 * share, 0.0, 0.0, co, nullptr, *ref) && !ref->empty) {
 					k_ref = ref->k_n * (lubricated_series ? share : table_ratio(false, shape_factor(ref->area, ref->Ixx, ref->Iyy, soft.thickness), mu, kg_of(soft)));
 				}
+				set_law_linear(k_ref, layer, r_patch);
 			}
 			r_patch.mLawCoefficient = float(k_ref);
 			r_patch.mLawExponent = 1.0f;
@@ -2238,6 +2312,7 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		r_patch.mNormalStiffness = float(MAX(kn, 0.0));
 		r_patch.mCentre = F > 0.0 ? world(cx, cy) : r_patch.mDeepest;
 		r_patch.mCoreGap = float(layer - dmax);
+		set_face_cores(overlap, d0, gx, gy, layer, world, r_patch);
 		r_patch.mNumRoll = 0;
 		r_patch.mRollingRadius = 0.0f;
 		r_patch.mEnabled = true;
@@ -2334,6 +2409,29 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	};
 	r_patch.mDeepest = line_world(0.0, y_deep);
 
+	// A Line spreads along it: the centroid of the overlap it would have one speculative band (w) deeper than now,
+	// d(y) - d_deep + w, a level line's middle and a cambered one's toward the end that touches first. A first touch solved
+	// as an impact acts there (at the deeper end itself it would turn a level line about its far end), and so does the row
+	// of a Line that presses nothing yet. A Point's is its deepest point.
+	double y_band = y_deep;
+	if (cls == 1) {
+		const double band = MAX(double(JoltProjectSettings::speculative_contact_distance), 1e-9);
+		const double dy = (yb - ya) / N_SLICES;
+		double sp = 0.0, spy = 0.0;
+		for (int i = 0; i < N_SLICES; ++i) {
+			const double y = ya + (double(i) + 0.5) * dy;
+			const double p = MAX(camber * (y - y_deep) + band, 0.0);
+			sp += p;
+			spy += p * y;
+		}
+		if (sp > 0.0) {
+			y_band = spy / sp;
+		}
+		r_patch.mHasImpactPoint = true;
+		r_patch.mImpactPoint = line_world(0.0, y_band);
+		r_patch.mImpactSquash = float(s0 + camber * y_band);
+	}
+
 	CurvedFig fig;
 	bool have = false;
 	double layer = 0.0;
@@ -2385,6 +2483,36 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				r_patch.mLawCoefficient = float(ref2.F * ratio2 / std::pow(s_two, nexp));
 			}
 		}
+		// The first-touch law the solver reads (Stage 1c-b): the pressed law itself at six squashes, the same law this
+		// patch uses when it presses. In the table, from a thousandth of the depth to the table's last squash (0.316 of
+		// it), the level line's slices or the point's figures; outside the table, for two soft sides, or where one
+		// lookup fails, the pressed fallback (the split law on the grid with its face ratio) from where the grid resolves
+		// the contact (a thousandth of the depth, or a quarter of the squash at which the contact's half-width reaches the
+		// depth, h^2 / 8R) to half the layers' whole depth. (Two curved soft sides read the two-sided design's law here as
+		// when pressed, not the lubricated series of the lead's decision 5, which the table does not cover: disclosed.)
+		const bool pressing = have && !fig.empty && fig.F > 0.0;
+		if (onset_pending || !pressing) {
+			int kept = 0;
+			if (!two_layers) {
+				kept = set_law_samples(1e-3 * soft.thickness, 0.316 * soft.thickness, 6, true, [&](double p_s, double &r_F) {
+					CurvedFig f;
+					const bool ok = cls == 1 ? table_line(p_s, 0.0, ya, yb, R, soft, mu, f) : table_point(p_s, R, soft, mu, f);
+					r_F = f.F;
+					return ok && !f.empty;
+				}, r_patch);
+			}
+			if (kept == 0) {
+				const double hh = co.h;
+				set_law_samples(MAX(1e-3 * hh, 0.25 * hh * hh / (2.0 * R)), 0.5 * layer, 6, false, [&](double p_s, double &r_F) {
+					CurvedFig f;
+					if (!curved_outside(cls == 1, p_s, R, co, 0.0, ya, yb, f) || f.empty || !(f.F > 0.0)) {
+						return false;
+					}
+					r_F = f.F * table_ratio(false, shape_factor(f.area, f.Ixx, f.Iyy, soft.thickness), mu, kg_of(soft));
+					return true;
+				}, r_patch);
+			}
+		}
 	} else if (soft.kind == JoltSoftSurface3D::KIND_SOLID) {
 		const double Es = e_star(soft, partner);
 		layer = 1e6;
@@ -2404,6 +2532,13 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			}
 			r_patch.mLawCoefficient = float(4.0 / 3.0 * Es * std::sqrt(R));
 			r_patch.mLawExponent = 1.5f;
+			// The first-touch law the solver reads: Hertz itself (two samples: one segment of exponent 1.5)
+			if (onset_pending || !(s0 > 0.0)) {
+				set_law_samples(1e-4 * R, 0.03 * R, 2, true, [&](double p_s, double &r_F) {
+					r_F = 4.0 / 3.0 * Es * std::sqrt(R) * std::pow(p_s, 1.5);
+					return true;
+				}, r_patch);
+			}
 		} else {
 			// UNSOURCED line law (design 2.3): slices along the line
 			const double dy = (yb - ya) / N_SLICES;
@@ -2459,6 +2594,17 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			}
 			r_patch.mLawCoefficient = float(MAX(kn, 0.0));
 			r_patch.mLawExponent = 1.0f;
+			// The first-touch law the solver reads (Stage 1c-b): the level line's slices at six squashes from 1e-4 R to
+			// 0.03 R; across a gap the slices carry nothing, so without them no first touch could be decided
+			if (onset_pending || !(F > 0.0)) {
+				const double L = yb - ya;
+				set_law_samples(1e-4 * R, 0.03 * R, 6, true, [&](double p_s, double &r_F) {
+					double P, b;
+					solid_line_load(p_s, R, Es, P, b);
+					r_F = L * P;
+					return true;
+				}, r_patch);
+			}
 		}
 	} else {
 		// Lumped: F = K_l s with the class's bed-of-springs profile. At a point, the squash s0. Along a line, a bed of
@@ -2525,10 +2671,29 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		}
 		r_patch.mLawCoefficient = float(soft.lumped_stiffness);
 		r_patch.mLawExponent = 1.0f;
+		if (onset_pending || !have) {
+			set_law_linear(soft.lumped_stiffness, MIN(layer, R), r_patch);
+		}
 	}
 
 	r_patch.mRigidStick = rigid_stick;
 	r_patch.mCoreGap = float(layer - d_deep);
+	// The core guard: a Line's two loaded ends, a Point's deepest point
+	if (cls == 1) {
+		const double ends[2] = { ya, yb };
+		for (int i = 0; i < 2; ++i) {
+			const double d = s0 + camber * ends[i];
+			r_patch.mCorePoint[i] = line_world(0.0, ends[i]);
+			r_patch.mCoreSquash[i] = float(d);
+			r_patch.mCoreGapAt[i] = float(layer - d);
+		}
+		r_patch.mNumCores = 2;
+	} else {
+		r_patch.mCorePoint[0] = r_patch.mDeepest;
+		r_patch.mCoreSquash[0] = float(d_deep);
+		r_patch.mCoreGapAt[0] = float(layer - d_deep);
+		r_patch.mNumCores = 1;
+	}
 	r_patch.mRollingRadius = float(R);
 	r_result.face_ratio = fig.face_ratio;
 	if (have && !fig.empty && fig.F > 0.0) {
@@ -2574,21 +2739,7 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		r_patch.mForce = 0.0f;
 		r_patch.mNormalStiffness = 0.0f;
 		r_patch.mNormalDampingRatio = float(loss_side.zeta_for(MAX(double(r_patch.mLawExponent), 1.0)));
-		r_patch.mCentre = r_patch.mDeepest;
-		if (cls == 1) {
-			const double band = MAX(double(JoltProjectSettings::speculative_contact_distance), 1e-9);
-			const double dy = (yb - ya) / N_SLICES;
-			double sp = 0.0, spy = 0.0;
-			for (int i = 0; i < N_SLICES; ++i) {
-				const double y = ya + (double(i) + 0.5) * dy;
-				const double p = MAX(camber * (y - y_deep) + band, 0.0);
-				sp += p;
-				spy += p * y;
-			}
-			if (sp > 0.0) {
-				r_patch.mCentre = line_world(0.0, spy / sp);
-			}
-		}
+		r_patch.mCentre = cls == 1 ? line_world(0.0, y_band) : r_patch.mDeepest;
 	}
 	r_patch.mEnabled = true;
 	r_result.outcome = JoltSoftBuildResult::BUILT;

@@ -53,9 +53,16 @@
 //   a strip model of slices along a line, the axisymmetric figures at a point; outside the table, the split law on
 //   the grid (counted).
 // - Two Layer faces: each side's layer with a lubricated face, compliances in series (the lead's decision 5).
+// - Two Layer sides on a Line or a Point: the two-sided design's law (design 4.6: the softer side's split law with the
+//   layers' local terms in series) on the grid, counted as outside the table. A disclosed restriction: the lubricated
+//   series of decision 5 is not read for curved patches, since the table holds one layer's figures and a series of two
+//   through it has no desk reference yet; PS7's band layer2 cases gate the law as built.
 // - Solid: Hertz at a point, the line law of design 2.3 (UNSOURCED constants) along a line; a Solid face pair stays
 //   rigid (counted).
 // - Lumped: F = K_l d with the class's bed-of-springs profile.
+// Each patch also carries its first-touch law as samples of its own pressed law (the solver reads them piecewise), the
+// point where a first touch solved as an impact acts (a Line: the centroid of the overlap one speculative band deeper
+// than its deepest point), and its core points (a face's overlap vertices, a Line's loaded ends, a Point's deepest point).
 // Units are the solver's: millimetres, kilograms, seconds (a force of 1 N is 1000).
 
 class JoltBody3D;
