@@ -2370,18 +2370,22 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 		p.mSpin = 0.0f;
 	}
 
-	// The approach at the deepest point (velocities already carry this step's gravity), and the part of it this
-	// step's gravity made against a support that does not move: a first touch is not an impact on that alone
+	// The approach at the deepest point (velocities already carry this step's gravity and forces), and the part of
+	// it this step's gravity and forces made: a first touch is not an impact on that alone. Gravity reaches a body
+	// through its gravity factor, or through its accumulated force when the host applies gravity itself (CRUMB's
+	// host keeps every gravity factor at 0), so both are read, as the restitution below and the rigid contact's
+	// restitution read them. Between two dynamic bodies under the same gravity the two cancel; against a static or
+	// kinematic support the whole increment counts.
 	Vec3 v1 = b.mRead1 != nullptr? b.mRead1->GetPointVelocityCOM(rd1) : Vec3::sZero();
 	Vec3 v2 = b.mRead2 != nullptr? b.mRead2->GetPointVelocityCOM(rd2) : Vec3::sZero();
 	float normal_velocity = (v2 - v1).Dot(n);
 	float approach = -normal_velocity;
-	Vec3 relative_gravity = Vec3::sZero();
+	Vec3 relative_acceleration = Vec3::sZero();
 	if (b.mWrite2 != nullptr)
-		relative_gravity += inGravity * b.mWrite2->GetGravityFactor();
+		relative_acceleration += inGravity * b.mWrite2->GetGravityFactor() + b.mWrite2->GetAccumulatedForce() * b.mWrite2->GetInverseMass();
 	if (b.mWrite1 != nullptr)
-		relative_gravity -= inGravity * b.mWrite1->GetGravityFactor();
-	float gravity_closing = max(0.0f, -relative_gravity.Dot(n) * inDeltaTime);
+		relative_acceleration -= inGravity * b.mWrite1->GetGravityFactor() + b.mWrite1->GetAccumulatedForce() * b.mWrite1->GetInverseMass();
+	float force_closing = max(0.0f, -relative_acceleration.Dot(n) * inDeltaTime);
 
 	// The core guard: a rigid speculative row at the deepest point against the backing
 	sSoftRowLinear(p.mCore, n, rd1, rd2, inInvM1, inInvI1, inInvM2, inInvI2);
@@ -2413,7 +2417,7 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 			stiffness_peak = n_law * c_law * std::pow(s_peak, n_law - 1.0f);
 		}
 		float a = Square(inDeltaTime) * stiffness_peak * w;
-		if (a > 0.5f && approach - gravity_closing > mPhysicsSettings.mMinVelocityForRestitution)
+		if (a > 0.5f && approach - force_closing > mPhysicsSettings.mMinVelocityForRestitution)
 		{
 			p.mImpact = true;
 			++mSoftStats.mImpacts;
@@ -2431,18 +2435,30 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 		float bias = speculative;
 		if (inPatch.mRestitution > 0.0f && normal_velocity < -mPhysicsSettings.mMinVelocityForRestitution && normal_velocity < -speculative)
 		{
-			Vec3 relative_acceleration = relative_gravity;
-			if (b.mWrite1 != nullptr)
-				relative_acceleration -= b.mWrite1->GetAccumulatedForce() * b.mWrite1->GetInverseMass();
-			if (b.mWrite2 != nullptr)
-				relative_acceleration += b.mWrite2->GetAccumulatedForce() * b.mWrite2->GetInverseMass();
+			// The step's gravity and forces taken off the bounce, as the rigid contact's restitution does
 			float force_delta_velocity = min(0.0f, relative_acceleration.Dot(n) * inDeltaTime);
 			bias = inPatch.mRestitution * (normal_velocity - force_delta_velocity);
 		}
 		sSoftRowRigid(p.mNormal, bias);
 	}
 	else
-		sSoftRowCompliant(p.mNormal, inPatch.mNormalStiffness, inPatch.mNormalDampingRatio, max(inPatch.mForce, 0.0f));
+	{
+		// The normal row's stiffness: the builder's, or, when the builder found nothing pressing (a Line or Point
+		// across a gap carries no force and no stiffness of its own), the patch's own law F = C s^n at the predicted
+		// overlap s = d0 + u h (the episode rule's implicit share acts on it). The secant C s^(n-1) makes that share
+		// carry the law's force at s, k s = C s^n; a linear law gives C itself.
+		float stiffness = inPatch.mNormalStiffness;
+		if (!(stiffness > 0.0f) && !(inPatch.mForce > 0.0f) && inPatch.mLawCoefficient > 0.0f)
+		{
+			float n_law = max(inPatch.mLawExponent, 1.0f);
+			float s_pred = max(d0 + approach * inDeltaTime, d0);
+			if (n_law == 1.0f)
+				stiffness = inPatch.mLawCoefficient;
+			else if (s_pred > 0.0f)
+				stiffness = inPatch.mLawCoefficient * std::pow(s_pred, n_law - 1.0f);
+		}
+		sSoftRowCompliant(p.mNormal, stiffness, inPatch.mNormalDampingRatio, max(inPatch.mForce, 0.0f));
+	}
 
 	// The friction block: two tangents at the centre and the spin about the normal
 	if (p.mStaticFriction > 0.0f)
