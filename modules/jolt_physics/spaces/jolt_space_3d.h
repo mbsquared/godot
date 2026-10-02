@@ -111,6 +111,7 @@ private:
 	JPH::ContactConstraintManager::SoftContactStats soft_stats_last;
 	bool soft_contacts_enabled = false;
 	bool soft_rigid_warned = false;
+	bool soft_overflow_reported = false;
 	bool soft_shear_enabled = true;
 
 	struct SoftPatchRecord {

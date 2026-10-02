@@ -365,6 +365,11 @@ void JoltSpace3D::step(float p_step) {
 		soft_rigid_warned = true;
 		WARN_PRINT(vformat("Soft surfaces are kept rigid in this space: %s.", soft_surfaces_supported() ? "physics/jolt_physics_3d/simulation/velocity_steps is below 8" : "the simulation is threaded (physics/jolt_physics_3d/simulation/single_threaded is off)"));
 	}
+	// More soft contacts than the step has room for: the rest are solved rigid; said once per space (design 9 PS15)
+	if (soft_stats_last.mOverflow > 0 && !soft_overflow_reported) {
+		soft_overflow_reported = true;
+		ERR_PRINT(vformat("Soft contacts beyond physics/jolt_physics_3d/limits/max_soft_contact_patches (%d) are solved rigid: %d in this step. Raise the limit to keep them soft.", JoltProjectSettings::max_soft_contact_patches, (int)soft_stats_last.mOverflow));
+	}
 
 	if ((update_error & JPH::EPhysicsUpdateError::ManifoldCacheFull) != JPH::EPhysicsUpdateError::None) {
 		WARN_PRINT_ONCE(vformat("Jolt Physics manifold cache exceeded capacity and contacts were ignored. "
