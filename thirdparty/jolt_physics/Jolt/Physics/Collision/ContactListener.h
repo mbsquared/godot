@@ -35,6 +35,77 @@ public:
 	ContactPoints			mRelativeContactPointsOn2;			///< Contact points on the surface of shape 2 relative to mBaseOffset. If there's no penetration, this will be the same as mRelativeContactPointsOn1. If there is penetration they will be different.
 };
 
+// CRUMB: a compliant (soft) contact's state carried from one step to the next, stored after the contact
+// points of the manifold's cache entry. It is reserved only for a manifold of a body with compliant
+// shapes (Body::HasCompliantShapes when the entry was made). Vectors are in body 2's local frame, as the
+// cache keeps the contact normal, so they keep their meaning when the next step picks other axes.
+struct SoftContactTail
+{
+	Float3					mFrictionImpulse;					// The friction rows' total impulse on body 2
+	Float3					mMoment;							// The tilt, roll and spin rows' total moment on body 2, about the patch centre
+	Float3					mShear;								// The pre-slip deflection: body 2's contact surface against body 1's
+	float					mNormalImpulse;						// The normal row's total impulse
+	float					mCoreImpulse;						// The core guard's total impulse
+	float					mSpinDeflection;					// The pre-slip twist about the normal (rad)
+	float					mEndSquash;							// The deepest overlap the solve left for the end of the step
+	uint32					mFlags;								// See EFlags
+	uint32					mActiveSet[6];						// A face patch's contact set, one bit per grid cell, for the next step's first pass
+	uint8					mGridLong;							// The grid the contact set belongs to
+	uint8					mGridShort;
+	uint16					mReserved;
+
+	enum EFlags : uint32
+	{
+		OnsetPending		= 1 << 0,							// The episode's first touch is still to be decided (set when the manifold is new)
+		Solved				= 1 << 1,							// A soft solve has written this tail
+	};
+};
+
+// CRUMB: a compliant patch for one manifold, built by the contact listener (OnContactAdded and
+// OnContactPersisted) through ContactSettings::mSoftPatch. When enabled, the solver replaces the
+// manifold's contact points by these rows: a normal row at the centre of pressure that applies the
+// patch law's force explicitly plus an implicit share, a core guard, tilt rows, a friction block (two
+// tangents and the spin) limited by the soft-finger ellipse, and rolling resistance rows. All values are
+// in the solver's units.
+struct SoftContactPatch
+{
+	bool					mEnabled = false;					// The listener built a patch; otherwise the manifold stays rigid
+	uint8					mClass = 0;							// 0 face, 1 line, 2 point
+	bool					mRigidStick = false;				// The friction rows stick rigidly (no pre-slip springs)
+	uint8					mNumTilt = 0;						// Rows about in-plane axes that carry tilt stiffness
+	uint8					mNumRoll = 0;						// Rows about in-plane axes that carry rolling resistance
+	RVec3					mCentre;							// Where the normal, friction and spin rows act (world); the deepest point when nothing presses
+	RVec3					mDeepest;							// The deepest point of the overlap, midway between the two surfaces (world)
+	Vec3					mTangent1 = Vec3::sZero();			// The patch's in-plane axes (world), tangent 2 = normal x tangent 1
+	Vec3					mTangent2 = Vec3::sZero();
+	float					mSquash = 0.0f;						// The overlap at mDeepest at the start of the step (negative: a gap)
+	float					mForce = 0.0f;						// The law's force at the start of the step, never negative
+	float					mNormalStiffness = 0.0f;			// d force / d squash at the start of the step
+	float					mLawCoefficient = 0.0f;				// F(s) = C s^n from first touch, for a first touch's predicted peak
+	float					mLawExponent = 1.0f;
+	float					mNormalDampingRatio = 0.0f;			// Damping ratio of the normal row (the law's exponent)
+	float					mDampingRatio = 0.0f;				// Damping ratio of the tilt, shear and spin rows (exponent 1)
+	float					mRestitution = 0.0f;				// The material's restitution, for a first touch the step cannot resolve
+	Vec3					mTiltAxis[2] = { Vec3::sZero(), Vec3::sZero() };
+	float					mTiltStiffness[2] = { 0.0f, 0.0f };
+	float					mTiltArmNeg[2] = { 0.0f, 0.0f };	// The moment about a tilt axis stays within the normal impulse times these
+	float					mTiltArmPos[2] = { 0.0f, 0.0f };
+	Vec3					mRollAxis[2] = { Vec3::sZero(), Vec3::sZero() };
+	float					mRollArm[2] = { 0.0f, 0.0f };		// Rolling resistance arm about each roll axis
+	float					mSpinRadius = 0.0f;					// The soft-finger ellipse's spin radius
+	float					mStaticFriction = 0.0f;
+	float					mSlidingFriction = 0.0f;
+	float					mShearStiffness = 0.0f;				// Pre-slip springs, per tangent and about the normal (0 with mRigidStick)
+	float					mSpinStiffness = 0.0f;
+	float					mRelaxationLength = 0.0f;			// The pre-slip deflection relaxes over this much rolling
+	float					mRollingRadius = 0.0f;				// Turns a relative spin about an in-plane axis into rolling speed
+	float					mArea = 0.0f;
+	float					mCoreGap = 0.0f;					// Layer left at mDeepest before the cores meet
+	uint32					mActiveSet[6] = { 0, 0, 0, 0, 0, 0 };	// A face patch's contact set, carried to the next step
+	uint8					mGridLong = 0;
+	uint8					mGridShort = 0;
+};
+
 /// When a contact point is added or persisted, the callback gets a chance to override certain properties of the contact constraint.
 /// The values are filled in with their defaults by the system so the callback doesn't need to modify anything, but it can if it wants to.
 class ContactSettings
@@ -53,6 +124,14 @@ public:
 	// on a hit the sweep path (continuous collision detection) resolves with these settings. It
 	// changes nothing the solver does.
 	bool					mReportSolved = false;
+	// CRUMB: the compliant contact. For a manifold of a body with compliant shapes the contact manager
+	// points mSoftPatch at a record the listener may fill (nullptr: this manifold cannot carry a patch)
+	// and mSoftTail at the manifold's tail from the last step (nullptr: a new episode). mIsSweepPath is
+	// set when the call comes from the sweep path (continuous collision detection), whose poses are not
+	// the time of impact: no patch is built there.
+	SoftContactPatch *		mSoftPatch = nullptr;
+	const SoftContactTail *	mSoftTail = nullptr;
+	bool					mIsSweepPath = false;
 };
 
 // CRUMB: what the solver applied to one manifold over the step, on body 2 (body 1 takes the opposite).

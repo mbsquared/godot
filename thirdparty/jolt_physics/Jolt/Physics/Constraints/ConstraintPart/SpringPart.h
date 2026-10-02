@@ -127,6 +127,27 @@ public:
 		}
 	}
 
+	// CRUMB: a compliant row's spring with an explicit preload (the soft contact). The row applies the law's
+	// force F explicitly, as the impulse h F, and an implicit share B = c + theta k h on the closing speed,
+	// so its impulse is h (F + B v_closing): softness 1 / (h B) and bias -F / B. When h B w is below
+	// inFixedEpsilon (no damping and no implicit share: the softness would be infinite and the bias 0/0)
+	// it returns false and leaves the outputs at a fixed row: the caller must apply h F once, with the
+	// row's clamp, and never turn the row rigid (that would delete the compliance it stands for).
+	static inline bool			CalculateSpringPropertiesWithPreload(float inDeltaTime, float inInvEffectiveMass, float inPreload, float inVelocityCoefficient, float inFixedEpsilon, float &outSoftness, float &outBias, float &outEffectiveMass)
+	{
+		if (!(inDeltaTime * inVelocityCoefficient * inInvEffectiveMass >= inFixedEpsilon))
+		{
+			outSoftness = 0.0f;
+			outBias = 0.0f;
+			outEffectiveMass = 0.0f;
+			return false;
+		}
+		outSoftness = 1.0f / (inDeltaTime * inVelocityCoefficient);
+		outBias = -inPreload / inVelocityCoefficient;
+		outEffectiveMass = 1.0f / (inInvEffectiveMass + outSoftness);
+		return true;
+	}
+
 	/// Returns if this spring is active
 	inline bool					IsActive() const
 	{

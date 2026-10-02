@@ -35,6 +35,7 @@
 #include "../objects/jolt_area_3d.h"
 #include "../objects/jolt_body_3d.h"
 #include "../objects/jolt_soft_body_3d.h"
+#include "jolt_soft_patch_3d.h"
 #include "jolt_space_3d.h"
 
 #include "Jolt/Physics/Collision/EstimateCollisionResponse.h"
@@ -44,6 +45,7 @@ void JoltContactListener3D::OnContactAdded(const JPH::Body &p_body1, const JPH::
 	_try_override_collision_response(p_body1, p_body2, p_settings);
 	_try_apply_surface_velocities(p_body1, p_body2, p_settings);
 	_try_request_solved_report(p_body1, p_body2, p_settings);
+	_try_apply_soft_patch(p_body1, p_body2, p_manifold, p_settings);
 	_try_add_contacts(p_body1, p_body2, p_manifold, p_settings);
 	_try_evaluate_area_overlap(p_body1, p_body2, p_manifold);
 
@@ -56,6 +58,7 @@ void JoltContactListener3D::OnContactPersisted(const JPH::Body &p_body1, const J
 	_try_override_collision_response(p_body1, p_body2, p_settings);
 	_try_apply_surface_velocities(p_body1, p_body2, p_settings);
 	_try_request_solved_report(p_body1, p_body2, p_settings);
+	_try_apply_soft_patch(p_body1, p_body2, p_manifold, p_settings);
 	_try_add_contacts(p_body1, p_body2, p_manifold, p_settings);
 	_try_evaluate_area_overlap(p_body1, p_body2, p_manifold);
 
@@ -241,6 +244,97 @@ bool JoltContactListener3D::_try_request_solved_report(const JPH::Body &p_jolt_b
 	}
 
 	p_settings.mReportSolved = true;
+	return true;
+}
+
+// CRUMB: the compliant contact. A manifold on a soft shape is built into a soft patch the solver solves in place of
+// its points (jolt_build_soft_patch); the pair's restitution becomes the material's, for a first touch the step
+// cannot resolve and for the sweep path, where no patch is built (its poses are not the time of impact). The static
+// friction is the module's combine of the two sides; the sliding one combines each side's kinetic coefficient (its
+// soft surface's, else its static one) by the same rule and is never above the static one.
+bool JoltContactListener3D::_try_apply_soft_patch(const JPH::Body &p_jolt_body1, const JPH::Body &p_jolt_body2, const JPH::ContactManifold &p_manifold, JPH::ContactSettings &p_settings) {
+	if (p_jolt_body1.IsSensor() || p_jolt_body2.IsSensor()) {
+		return false;
+	}
+
+	if (!p_jolt_body1.IsRigidBody() || !p_jolt_body2.IsRigidBody()) {
+		return false;
+	}
+
+	const JoltBody3D *body1 = reinterpret_cast<JoltBody3D *>(p_jolt_body1.GetUserData());
+	const JoltBody3D *body2 = reinterpret_cast<JoltBody3D *>(p_jolt_body2.GetUserData());
+	if (!body1->has_soft_shapes() && !body2->has_soft_shapes()) {
+		return false;
+	}
+
+	const JoltSoftSurface3D *surface1 = body1->get_contact_soft_surface(p_jolt_body1, p_manifold.mSubShapeID1);
+	const JoltSoftSurface3D *surface2 = body2->get_contact_soft_surface(p_jolt_body2, p_manifold.mSubShapeID2);
+	if (surface1 == nullptr && surface2 == nullptr) {
+		return false;
+	}
+
+	// The lossier side's restitution (a soft pair ignores Bounce)
+	const JoltSoftSurface3D &lossier = surface1 == nullptr ? *surface2 : (surface2 == nullptr ? *surface1 : (surface1->restitution <= surface2->restitution ? *surface1 : *surface2));
+	p_settings.mCombinedRestitution = (float)lossier.restitution;
+
+	if (p_settings.mIsSweepPath) {
+		space->count_soft_contact(JoltSpace3D::SOFT_COUNT_SWEEP_PATH);
+		return true;
+	}
+
+	if (!space->are_soft_contacts_enabled()) {
+		space->count_soft_contact(JoltSpace3D::SOFT_COUNT_BAKED_RIGID);
+		return true;
+	}
+
+	if (p_settings.mSoftPatch == nullptr) {
+		// The manifold reserved no tail (the body's compliant flag was not set when it was made): it stays rigid
+		space->count_soft_contact(JoltSpace3D::SOFT_COUNT_NO_TAIL);
+		return true;
+	}
+
+	float friction1 = 0.0f;
+	float bounce1 = 0.0f;
+	float friction2 = 0.0f;
+	float bounce2 = 0.0f;
+	body1->get_contact_surface(p_jolt_body1, p_manifold.mSubShapeID1, friction1, bounce1);
+	body2->get_contact_surface(p_jolt_body2, p_manifold.mSubShapeID2, friction2, bounce2);
+	const float kinetic1 = surface1 != nullptr && surface1->sliding_friction >= 0.0 ? (float)surface1->sliding_friction : friction1;
+	const float kinetic2 = surface2 != nullptr && surface2->sliding_friction >= 0.0 ? (float)surface2->sliding_friction : friction2;
+
+	JoltSoftPatchInput input;
+	input.body1 = &p_jolt_body1;
+	input.body2 = &p_jolt_body2;
+	input.manifold = &p_manifold;
+	input.surface1 = surface1;
+	input.surface2 = surface2;
+	input.static_friction = p_settings.mCombinedFriction;
+	input.sliding_friction = MIN(JoltSpace3D::combine_friction(kinetic1, kinetic2), p_settings.mCombinedFriction);
+	input.tail = p_settings.mSoftTail;
+
+	JoltSoftBuildResult result;
+	if (jolt_build_soft_patch(input, *p_settings.mSoftPatch, result)) {
+		if (!space->is_soft_shear_enabled()) {
+			// The test switch CRUMB_SOFT_SHEAR=0: friction sticks rigidly, no pre-slip springs
+			p_settings.mSoftPatch->mRigidStick = true;
+			p_settings.mSoftPatch->mShearStiffness = 0.0f;
+			p_settings.mSoftPatch->mSpinStiffness = 0.0f;
+		}
+		space->count_soft_contact(JoltSpace3D::SOFT_COUNT_BUILT);
+		if (result.outside_table) {
+			space->count_soft_contact(JoltSpace3D::SOFT_COUNT_OUTSIDE_TABLE);
+		}
+		if (result.not_settled) {
+			space->count_soft_contact(JoltSpace3D::SOFT_COUNT_NOT_SETTLED);
+		}
+		const int kind = surface1 != nullptr ? surface1->kind : surface2->kind;
+		space->record_soft_patch(p_jolt_body1.GetID(), body1->find_shape_index(p_manifold.mSubShapeID1), p_jolt_body2.GetID(), body2->find_shape_index(p_manifold.mSubShapeID2), *p_settings.mSoftPatch, p_manifold.mWorldSpaceNormal, result, kind);
+	} else if (result.outcome == JoltSoftBuildResult::SOLID_FACE) {
+		space->count_soft_contact(JoltSpace3D::SOFT_COUNT_SOLID_FACE);
+	} else {
+		space->count_soft_contact(JoltSpace3D::SOFT_COUNT_UNCLASSED);
+	}
+
 	return true;
 }
 

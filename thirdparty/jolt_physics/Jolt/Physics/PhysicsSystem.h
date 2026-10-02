@@ -67,6 +67,11 @@ public:
 	void						SetContactListener(ContactListener *inListener)				{ mContactManager.SetContactListener(inListener); }
 	ContactListener *			GetContactListener() const									{ return mContactManager.GetContactListener(); }
 
+	// CRUMB: the compliant contact. InitSoftContacts sets how many soft patches a step can solve (0, the default,
+	// keeps every contact rigid); GetSoftContactStats gives the last step's counts.
+	void						InitSoftContacts(uint inMaxPatches, bool inBlockWarmStart = true) { mContactManager.InitSoftContacts(inMaxPatches, inBlockWarmStart); }
+	ContactConstraintManager::SoftContactStats GetSoftContactStats() const					{ return mContactManager.GetSoftContactStats(); }
+
 	/// Listener that is notified whenever a contact point between a soft body and another body
 	void						SetSoftBodyContactListener(SoftBodyContactListener *inListener) { mSoftBodyContactListener = inListener; }
 	SoftBodyContactListener *	GetSoftBodyContactListener() const							{ return mSoftBodyContactListener; }

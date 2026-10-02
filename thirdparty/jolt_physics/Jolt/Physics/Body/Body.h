@@ -114,6 +114,13 @@ public:
 	/// Checks if the combination of this body and inBody2 should use enhanced internal edge removal
 	inline bool				GetEnhancedInternalEdgeRemovalWithBody(const Body &inBody2) const { return ((mFlags.load(memory_order_relaxed) | inBody2.mFlags.load(memory_order_relaxed)) & uint8(EFlags::EnhancedInternalEdgeRemoval)) != 0; }
 
+	// CRUMB: whether some of this body's shapes are compliant (soft) surfaces. Its manifolds then reserve a
+	// soft-contact tail in the contact cache, are never served from the body-pair cache, and ignore the sweep
+	// path's hits at fraction 0. Use BodyInterface::SetHasCompliantShapes on a body that may already be in
+	// contact, so the contact cache is invalidated and no manifold of the wrong size is replayed.
+	inline void				SetHasCompliantShapes(bool inHas)								{ JPH_ASSERT(IsRigidBody()); if (inHas) mFlags.fetch_or(uint8(EFlags::HasCompliantShapes), memory_order_relaxed); else mFlags.fetch_and(uint8(~uint8(EFlags::HasCompliantShapes)), memory_order_relaxed); }
+	inline bool				HasCompliantShapes() const										{ return (mFlags.load(memory_order_relaxed) & uint8(EFlags::HasCompliantShapes)) != 0; }
+
 	/// Get the bodies motion type.
 	inline EMotionType		GetMotionType() const											{ return mMotionType; }
 
@@ -414,6 +421,7 @@ private:
 		UseManifoldReduction			= 1 << 4,											///< Set this bit to indicate that this body can use manifold reduction (if PhysicsSettings::mUseManifoldReduction is true)
 		ApplyGyroscopicForce			= 1 << 5,											///< Set this bit to indicate that the gyroscopic force should be applied to this body (aka Dzhanibekov effect, see https://en.wikipedia.org/wiki/Tennis_racket_theorem)
 		EnhancedInternalEdgeRemoval		= 1 << 6,											///< Set this bit to indicate that enhanced internal edge removal should be used for this body (see BodyCreationSettings::mEnhancedInternalEdgeRemoval)
+		HasCompliantShapes				= 1 << 7,											// CRUMB: some of the body's shapes are compliant surfaces (see SetHasCompliantShapes)
 	};
 
 	// 16 byte aligned

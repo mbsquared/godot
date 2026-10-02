@@ -207,6 +207,8 @@ Body *BodyManager::AllocateBody(const BodyCreationSettings &inBodyCreationSettin
 		body->SetUseManifoldReduction(true);
 	if (inBodyCreationSettings.mApplyGyroscopicForce)
 		body->SetApplyGyroscopicForce(true);
+	if (inBodyCreationSettings.mHasCompliantShapes) // CRUMB
+		body->SetHasCompliantShapes(true);
 	if (inBodyCreationSettings.mEnhancedInternalEdgeRemoval)
 		body->SetEnhancedInternalEdgeRemoval(true);
 	SetBodyObjectLayerInternal(*body, inBodyCreationSettings.mObjectLayer);

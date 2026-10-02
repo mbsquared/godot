@@ -232,6 +232,7 @@ void JoltBody3D::_add_to_space() {
 	jolt_settings->mCollideKinematicVsNonDynamic = reports_all_kinematic_contacts();
 	jolt_settings->mUseManifoldReduction = _uses_manifold_reduction();
 	jolt_settings->mApplyGyroscopicForce = apply_gyroscopic_force;
+	jolt_settings->mHasCompliantShapes = shape_soft; // CRUMB: from the settings, so a rebuilt body keeps it
 	jolt_settings->mAllowSleeping = is_sleep_actually_allowed();
 	jolt_settings->mLinearDamping = 0.0f;
 	jolt_settings->mAngularDamping = 0.0f;
@@ -1029,6 +1030,10 @@ void JoltBody3D::reset_mass_properties() {
 }
 
 bool JoltBody3D::_uses_manifold_reduction() const {
+	// CRUMB: a body with a soft shape never reduces: a merged manifold would put two shapes under one patch
+	if (shape_soft) {
+		return false;
+	}
 	return manifold_reduction_mode == 0 ? !reports_contacts() : manifold_reduction_mode == 1;
 }
 
@@ -1117,6 +1122,47 @@ void JoltBody3D::get_contact_surface(const JPH::Body &p_jolt_body, const JPH::Su
 		r_friction = shape.get_surface_friction();
 		r_bounce = shape.get_surface_bounce();
 	}
+}
+
+void JoltBody3D::set_shape_soft_surface(int p_index, const JoltSoftSurface3D &p_surface) {
+	ERR_FAIL_INDEX(p_index, (int)shapes.size());
+	ERR_FAIL_COND_MSG(space != nullptr && space->is_stepping(), vformat("Refused a soft surface on '%s' while its space steps. Soft surfaces are set at the bake.", to_string()));
+
+	shapes[p_index].set_soft_surface(p_surface);
+
+	bool soft = false;
+	for (const JoltShapeInstance3D &shape : shapes) {
+		soft = soft || shape.is_soft();
+	}
+
+	if (soft != shape_soft) {
+		shape_soft = soft;
+		const bool use_manifold_reduction = _uses_manifold_reduction();
+		if (!in_space()) {
+			jolt_settings->mHasCompliantShapes = soft;
+			jolt_settings->mUseManifoldReduction = use_manifold_reduction;
+		} else {
+			// Both setters invalidate the body's contact cache, so no manifold of the old size is replayed
+			space->get_body_iface().SetHasCompliantShapes(jolt_body->GetID(), soft);
+			space->get_body_iface().SetUseManifoldReduction(jolt_body->GetID(), use_manifold_reduction);
+		}
+	}
+
+	wake_up();
+}
+
+const JoltSoftSurface3D *JoltBody3D::get_contact_soft_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id) const {
+	if (!shape_soft) {
+		return nullptr;
+	}
+
+	const int index = find_shape_index((uint32_t)p_jolt_body.GetShape()->GetSubShapeUserData(p_sub_shape_id));
+	if (index < 0) {
+		return nullptr;
+	}
+
+	const JoltShapeInstance3D &shape = shapes[index];
+	return shape.is_soft() ? &shape.get_soft_surface() : nullptr;
 }
 
 void JoltBody3D::set_contact_force_tracking(bool p_enable) {

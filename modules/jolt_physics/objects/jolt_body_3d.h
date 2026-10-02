@@ -118,6 +118,11 @@ private:
 	// CRUMB: at least one shape carries its own friction and bounce.
 	bool shape_surfaces = false;
 
+	// CRUMB: at least one shape is a soft surface (the compliant contact). The Jolt body then carries the
+	// HasCompliantShapes flag (set from the creation settings, so a rebuild keeps it) and never reduces its
+	// manifolds, whatever the reduction mode.
+	bool shape_soft = false;
+
 	// CRUMB: the contact-force read. One slot per shape, written by the contact listener after each
 	// velocity solve with what the solve applied (impulses, the moment about the centre of mass, the
 	// pressing impulse, the pressing-weighted sum of contact points, the area and the largest friction
@@ -317,6 +322,15 @@ public:
 	// The friction and bounce of the shape a contact is on: its own when set, else the body's. Read
 	// only, from the space's combine callbacks during the step.
 	void get_contact_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id, float &r_friction, float &r_bounce) const;
+
+	// CRUMB: the soft surfaces (see PhysicsServer3D::body_set_shape_soft_surface). Setting one is refused while the
+	// space steps; a soft shape turns manifold reduction off and sets the Jolt body's compliant flag (the live body's
+	// through the body interface, which invalidates its contact cache).
+	bool has_soft_shapes() const { return shape_soft; }
+	void set_shape_soft_surface(int p_index, const JoltSoftSurface3D &p_surface);
+	// The soft surface of the shape a contact is on, or nullptr when that shape is rigid. Read only, from the
+	// contact listener during the step.
+	const JoltSoftSurface3D *get_contact_soft_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id) const;
 
 	// CRUMB: the contact-force read (see PhysicsServer3D::body_set_contact_force_tracking). Tracking
 	// changes nothing the solver does; switching it off forgets every slot.

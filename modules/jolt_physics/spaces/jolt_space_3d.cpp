@@ -41,11 +41,13 @@
 #include "../shapes/jolt_shape_3d.h"
 #include "jolt_body_activation_listener_3d.h"
 #include "jolt_contact_listener_3d.h"
+#include "jolt_job_system.h"
 #include "jolt_layers.h"
 #include "jolt_physics_direct_space_state_3d.h"
 #include "jolt_temp_allocator.h"
 
 #include "core/io/file_access.h"
+#include "core/os/os.h"
 #include "core/os/time.h"
 #include "core/string/print_string.h"
 #include "core/templates/safe_refcount.h"
@@ -154,6 +156,14 @@ void JoltSpace3D::_init_physics_system() {
 	physics_system->SetGravity(JPH::Vec3::sZero());
 	physics_system->SetContactListener(contact_listener);
 	physics_system->SetSoftBodyContactListener(contact_listener);
+
+	// CRUMB: room for this many soft patches a step (the compliant contact); a fresh world, so a rebuild gives an empty
+	// contact cache and no soft tail survives it
+	// The soft gates' test switches, read when a world is made: CRUMB_SOFT_BLOCK=0 leaves the soft rows to last step's
+	// warm start (no cluster correction), CRUMB_SOFT_SHEAR=0 makes every soft patch's friction stick rigidly.
+	const bool block_warm_start = OS::get_singleton()->get_environment("CRUMB_SOFT_BLOCK") != "0";
+	soft_shear_enabled = OS::get_singleton()->get_environment("CRUMB_SOFT_SHEAR") != "0";
+	physics_system->InitSoftContacts((JPH::uint)MAX(JoltProjectSettings::max_soft_contact_patches, 0), block_warm_start);
 
 	physics_system->SetSimCollideBodyVsBody([](const JPH::Body &p_body1, const JPH::Body &p_body2, JPH::Mat44Arg p_transform_com1, JPH::Mat44Arg p_transform_com2, JPH::CollideShapeSettings &p_collide_shape_settings, JPH::CollideShapeCollector &p_collector, const JPH::ShapeFilter &p_shape_filter) {
 		if (p_body1.IsSensor() || p_body2.IsSensor()) {
@@ -329,11 +339,32 @@ void JoltSpace3D::step(float p_step) {
 		}
 	}
 
+	// CRUMB: soft contacts need single-threaded physics and at least 8 velocity steps (SOFT-CONTACT brief 5.4, 5.10);
+	// otherwise every soft surface stays rigid, with one line. This step's counts and patch records start empty.
+	soft_contacts_enabled = soft_surfaces_supported() && JoltProjectSettings::simulation_velocity_steps >= 8;
+	for (int i = 0; i < SOFT_COUNT_MAX; ++i) {
+		soft_counts[i].set(0);
+	}
+	{
+		MutexLock lock(soft_records_mutex);
+		soft_record_count = 0;
+	}
+
 	_pre_step(p_step);
 
 	physics_system->SetBodyActivationListener(body_activation_listener);
 
 	const JPH::EPhysicsUpdateError update_error = physics_system->Update(p_step, 1, temp_allocator, job_system);
+
+	// CRUMB: the soft contact's counts of the step just done
+	for (int i = 0; i < SOFT_COUNT_MAX; ++i) {
+		soft_counts_last[i] = soft_counts[i].get();
+	}
+	soft_stats_last = physics_system->GetSoftContactStats();
+	if (soft_counts_last[SOFT_COUNT_BAKED_RIGID] > 0 && !soft_rigid_warned) {
+		soft_rigid_warned = true;
+		WARN_PRINT(vformat("Soft surfaces are kept rigid in this space: %s.", soft_surfaces_supported() ? "physics/jolt_physics_3d/simulation/velocity_steps is below 8" : "the simulation is threaded (physics/jolt_physics_3d/simulation/single_threaded is off)"));
+	}
 
 	if ((update_error & JPH::EPhysicsUpdateError::ManifoldCacheFull) != JPH::EPhysicsUpdateError::None) {
 		WARN_PRINT_ONCE(vformat("Jolt Physics manifold cache exceeded capacity and contacts were ignored. "
@@ -362,6 +393,77 @@ void JoltSpace3D::step(float p_step) {
 	_post_step(p_step);
 
 	stepping = false;
+}
+
+bool JoltSpace3D::soft_surfaces_supported() const {
+	const JoltJobSystem *jolt_job_system = static_cast<const JoltJobSystem *>(job_system);
+	return jolt_job_system != nullptr && jolt_job_system->is_single_threaded();
+}
+
+float JoltSpace3D::combine_friction(float p_friction1, float p_friction2) {
+	switch (JoltProjectSettings::friction_combine) {
+		case JOLT_FRICTION_COMBINE_MAX:
+			return Math::abs(MAX(p_friction1, p_friction2));
+		case JOLT_FRICTION_COMBINE_AVERAGE:
+			return Math::abs(0.5f * (p_friction1 + p_friction2));
+		case JOLT_FRICTION_COMBINE_GEOMETRIC_MEAN:
+			return Math::sqrt(Math::abs(p_friction1 * p_friction2));
+		default:
+			return Math::abs(MIN(p_friction1, p_friction2));
+	}
+}
+
+void JoltSpace3D::record_soft_patch(const JPH::BodyID &p_body1, int p_shape1, const JPH::BodyID &p_body2, int p_shape2, const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind) {
+	MutexLock lock(soft_records_mutex);
+	if (soft_record_count >= soft_records.size()) {
+		soft_records.resize(soft_record_count + 1);
+	}
+	SoftPatchRecord &record = soft_records[soft_record_count++];
+	record.body1 = p_body1;
+	record.body2 = p_body2;
+	record.shape1 = p_shape1;
+	record.shape2 = p_shape2;
+	record.figures = jolt_soft_patch_debug_array(p_patch, p_normal, p_result, p_kind);
+}
+
+PackedInt32Array JoltSpace3D::get_soft_contact_stats() const {
+	// Last step's: patches solved soft, rows damped by the step, first-touch impacts, patches outside the table,
+	// patches refused for want of room, then (appended) soft clusters over the block cap, impacts on a resting
+	// overlap, rows applied as fixed impulses, soft contacts kept rigid without a tail, kept rigid for threading or
+	// velocity steps, unclassed pairs kept rigid, face patches whose contact set did not settle, sweep-path calls
+	// on soft pairs, Solid face pairs kept rigid, patches the listener built
+	PackedInt32Array stats;
+	stats.resize(15);
+	int32_t *w = stats.ptrw();
+	w[0] = (int32_t)soft_stats_last.mPatches;
+	w[1] = (int32_t)soft_stats_last.mDampedRows;
+	w[2] = (int32_t)soft_stats_last.mImpacts;
+	w[3] = (int32_t)soft_counts_last[SOFT_COUNT_OUTSIDE_TABLE];
+	w[4] = (int32_t)soft_stats_last.mOverflow;
+	w[5] = (int32_t)soft_stats_last.mClusterOverCap;
+	w[6] = (int32_t)soft_stats_last.mRestingImpacts;
+	w[7] = (int32_t)soft_stats_last.mFixedRows;
+	w[8] = (int32_t)soft_counts_last[SOFT_COUNT_NO_TAIL];
+	w[9] = (int32_t)soft_counts_last[SOFT_COUNT_BAKED_RIGID];
+	w[10] = (int32_t)soft_counts_last[SOFT_COUNT_UNCLASSED];
+	w[11] = (int32_t)soft_counts_last[SOFT_COUNT_NOT_SETTLED];
+	w[12] = (int32_t)soft_counts_last[SOFT_COUNT_SWEEP_PATH];
+	w[13] = (int32_t)soft_counts_last[SOFT_COUNT_SOLID_FACE];
+	w[14] = (int32_t)soft_counts_last[SOFT_COUNT_BUILT];
+	return stats;
+}
+
+PackedFloat32Array JoltSpace3D::get_soft_patch_debug(const JPH::BodyID &p_body_a, int p_shape_a, const JPH::BodyID &p_body_b, int p_shape_b) const {
+	MutexLock lock(soft_records_mutex);
+	for (uint32_t i = 0; i < soft_record_count; ++i) {
+		const SoftPatchRecord &record = soft_records[i];
+		const bool forward = record.body1 == p_body_a && record.shape1 == p_shape_a && record.body2 == p_body_b && record.shape2 == p_shape_b;
+		const bool reverse = record.body1 == p_body_b && record.shape1 == p_shape_b && record.body2 == p_body_a && record.shape2 == p_shape_a;
+		if (forward || reverse) {
+			return record.figures;
+		}
+	}
+	return PackedFloat32Array();
 }
 
 void JoltSpace3D::call_queries() {

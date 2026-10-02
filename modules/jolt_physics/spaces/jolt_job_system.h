@@ -99,6 +99,9 @@ public:
 	void pre_step();
 	void post_step();
 
+	// CRUMB: whether every job runs inline on the stepping thread (simulation/single_threaded when the system was made)
+	bool is_single_threaded() const { return single_threaded; }
+
 #ifdef DEBUG_ENABLED
 	void flush_timings();
 #endif

@@ -347,6 +347,7 @@ BodyCreationSettings Body::GetBodyCreationSettings() const
 	result.mCollideKinematicVsNonDynamic = GetCollideKinematicVsNonDynamic();
 	result.mUseManifoldReduction = GetUseManifoldReduction();
 	result.mApplyGyroscopicForce = GetApplyGyroscopicForce();
+	result.mHasCompliantShapes = HasCompliantShapes(); // CRUMB
 	result.mMotionQuality = mMotionProperties != nullptr? mMotionProperties->GetMotionQuality() : EMotionQuality::Discrete;
 	result.mEnhancedInternalEdgeRemoval = GetEnhancedInternalEdgeRemoval();
 	result.mAllowSleeping = mMotionProperties != nullptr? GetAllowSleeping() : true;

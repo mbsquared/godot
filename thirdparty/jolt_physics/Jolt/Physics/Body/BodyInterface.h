@@ -285,6 +285,11 @@ public:
 	///@{
 	void						SetUseManifoldReduction(const BodyID &inBodyID, bool inUseReduction);
 	bool						GetUseManifoldReduction(const BodyID &inBodyID) const;
+
+	// CRUMB: whether some of a body's shapes are compliant surfaces (Body::SetHasCompliantShapes). A change
+	// invalidates the body's contact cache, so no manifold of the wrong size is replayed.
+	void						SetHasCompliantShapes(const BodyID &inBodyID, bool inHas);
+	bool						GetHasCompliantShapes(const BodyID &inBodyID) const;
 	///@}
 
 	///@name Sensor

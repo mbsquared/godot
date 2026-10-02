@@ -30,6 +30,11 @@
 
 #pragma once
 
+#include "jolt_soft_patch_3d.h"
+
+#include "core/os/mutex.h"
+#include "core/templates/local_vector.h"
+#include "core/templates/safe_refcount.h"
 #include "servers/physics_3d/physics_server_3d.h"
 
 #include "Jolt/Jolt.h"
@@ -84,6 +89,40 @@ class JoltSpace3D {
 
 	bool active = false;
 	bool stepping = false;
+
+public:
+	// CRUMB: what the contact listener did with soft contacts this step (the status line and the probes)
+	enum SoftCount {
+		SOFT_COUNT_BUILT, // patches the listener built
+		SOFT_COUNT_OUTSIDE_TABLE, // curved patches outside the layer table (the split law on the grid)
+		SOFT_COUNT_NOT_SETTLED, // face patches whose contact set did not settle within the pass cap
+		SOFT_COUNT_SWEEP_PATH, // calls from the sweep path on soft pairs (no patch, the material's restitution)
+		SOFT_COUNT_BAKED_RIGID, // soft contacts kept rigid: threaded simulation or velocity steps below 8
+		SOFT_COUNT_NO_TAIL, // soft contacts kept rigid: the manifold reserved no tail
+		SOFT_COUNT_SOLID_FACE, // Solid face pairs, rigid by design
+		SOFT_COUNT_UNCLASSED, // pairs the builder could not class (or whose footprints miss): rigid
+		SOFT_COUNT_MAX,
+	};
+
+private:
+	// CRUMB: the soft contact's per-step state
+	SafeNumeric<uint32_t> soft_counts[SOFT_COUNT_MAX];
+	uint32_t soft_counts_last[SOFT_COUNT_MAX] = {};
+	JPH::ContactConstraintManager::SoftContactStats soft_stats_last;
+	bool soft_contacts_enabled = false;
+	bool soft_rigid_warned = false;
+	bool soft_shear_enabled = true;
+
+	struct SoftPatchRecord {
+		JPH::BodyID body1;
+		JPH::BodyID body2;
+		int shape1 = -1;
+		int shape2 = -1;
+		PackedFloat32Array figures;
+	};
+	Mutex soft_records_mutex;
+	LocalVector<SoftPatchRecord> soft_records;
+	uint32_t soft_record_count = 0;
 
 	void _pre_step(float p_step);
 	void _post_step(float p_step);
@@ -146,6 +185,18 @@ public:
 
 	float get_last_step() const { return last_step; }
 	uint64_t get_step_serial() const { return step_serial; }
+
+	// CRUMB: the soft contact. Soft contacts need single-threaded physics and at least 8 velocity steps; otherwise
+	// they stay rigid, with one line. The counts and the patch records are the last completed step's.
+	bool soft_surfaces_supported() const;
+	bool are_soft_contacts_enabled() const { return soft_contacts_enabled; }
+	bool is_soft_shear_enabled() const { return soft_shear_enabled; }
+	void count_soft_contact(SoftCount p_count) { soft_counts[p_count].increment(); }
+	void record_soft_patch(const JPH::BodyID &p_body1, int p_shape1, const JPH::BodyID &p_body2, int p_shape2, const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind);
+	PackedInt32Array get_soft_contact_stats() const;
+	PackedFloat32Array get_soft_patch_debug(const JPH::BodyID &p_body_a, int p_shape_a, const JPH::BodyID &p_body_b, int p_shape_b) const;
+	// The module's friction combine (the project setting's rule) of two figures
+	static float combine_friction(float p_friction1, float p_friction2);
 
 	JPH::Body *add_object(const JoltObject3D &p_object, const JPH::BodyCreationSettings &p_settings, bool p_sleeping = false);
 	JPH::Body *add_object(const JoltObject3D &p_object, const JPH::SoftBodyCreationSettings &p_settings, bool p_sleeping = false);

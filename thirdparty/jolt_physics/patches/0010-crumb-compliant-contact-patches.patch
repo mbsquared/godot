@@ -1,0 +1,1929 @@
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Body/Body.cpp b/thirdparty/jolt_physics/Jolt/Physics/Body/Body.cpp
+index 034f345286..4fd617ef28 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Body/Body.cpp
++++ b/thirdparty/jolt_physics/Jolt/Physics/Body/Body.cpp
+@@ -347,6 +347,7 @@ BodyCreationSettings Body::GetBodyCreationSettings() const
+ 	result.mCollideKinematicVsNonDynamic = GetCollideKinematicVsNonDynamic();
+ 	result.mUseManifoldReduction = GetUseManifoldReduction();
+ 	result.mApplyGyroscopicForce = GetApplyGyroscopicForce();
++	result.mHasCompliantShapes = HasCompliantShapes(); // CRUMB
+ 	result.mMotionQuality = mMotionProperties != nullptr? mMotionProperties->GetMotionQuality() : EMotionQuality::Discrete;
+ 	result.mEnhancedInternalEdgeRemoval = GetEnhancedInternalEdgeRemoval();
+ 	result.mAllowSleeping = mMotionProperties != nullptr? GetAllowSleeping() : true;
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Body/Body.h b/thirdparty/jolt_physics/Jolt/Physics/Body/Body.h
+index 44d71eb999..35b25681dd 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Body/Body.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Body/Body.h
+@@ -114,6 +114,13 @@ public:
+ 	/// Checks if the combination of this body and inBody2 should use enhanced internal edge removal
+ 	inline bool				GetEnhancedInternalEdgeRemovalWithBody(const Body &inBody2) const { return ((mFlags.load(memory_order_relaxed) | inBody2.mFlags.load(memory_order_relaxed)) & uint8(EFlags::EnhancedInternalEdgeRemoval)) != 0; }
+ 
++	// CRUMB: whether some of this body's shapes are compliant (soft) surfaces. Its manifolds then reserve a
++	// soft-contact tail in the contact cache, are never served from the body-pair cache, and ignore the sweep
++	// path's hits at fraction 0. Use BodyInterface::SetHasCompliantShapes on a body that may already be in
++	// contact, so the contact cache is invalidated and no manifold of the wrong size is replayed.
++	inline void				SetHasCompliantShapes(bool inHas)								{ JPH_ASSERT(IsRigidBody()); if (inHas) mFlags.fetch_or(uint8(EFlags::HasCompliantShapes), memory_order_relaxed); else mFlags.fetch_and(uint8(~uint8(EFlags::HasCompliantShapes)), memory_order_relaxed); }
++	inline bool				HasCompliantShapes() const										{ return (mFlags.load(memory_order_relaxed) & uint8(EFlags::HasCompliantShapes)) != 0; }
++
+ 	/// Get the bodies motion type.
+ 	inline EMotionType		GetMotionType() const											{ return mMotionType; }
+ 
+@@ -414,6 +421,7 @@ private:
+ 		UseManifoldReduction			= 1 << 4,											///< Set this bit to indicate that this body can use manifold reduction (if PhysicsSettings::mUseManifoldReduction is true)
+ 		ApplyGyroscopicForce			= 1 << 5,											///< Set this bit to indicate that the gyroscopic force should be applied to this body (aka Dzhanibekov effect, see https://en.wikipedia.org/wiki/Tennis_racket_theorem)
+ 		EnhancedInternalEdgeRemoval		= 1 << 6,											///< Set this bit to indicate that enhanced internal edge removal should be used for this body (see BodyCreationSettings::mEnhancedInternalEdgeRemoval)
++		HasCompliantShapes				= 1 << 7,											// CRUMB: some of the body's shapes are compliant surfaces (see SetHasCompliantShapes)
+ 	};
+ 
+ 	// 16 byte aligned
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Body/BodyCreationSettings.h b/thirdparty/jolt_physics/Jolt/Physics/Body/BodyCreationSettings.h
+index 8949b2ec3e..d850cb6706 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Body/BodyCreationSettings.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Body/BodyCreationSettings.h
+@@ -99,6 +99,7 @@ public:
+ 	bool					mApplyGyroscopicForce = false;									///< Set to indicate that the gyroscopic force should be applied to this body (aka Dzhanibekov effect, see https://en.wikipedia.org/wiki/Tennis_racket_theorem)
+ 	EMotionQuality			mMotionQuality = EMotionQuality::Discrete;						///< Motion quality, or how well it detects collisions when it has a high velocity
+ 	bool					mEnhancedInternalEdgeRemoval = false;							///< Set to indicate that extra effort should be made to try to remove ghost contacts (collisions with internal edges of a mesh). This is more expensive but makes bodies move smoother over a mesh with convex edges.
++	bool					mHasCompliantShapes = false;									// CRUMB: some of the body's shapes are compliant surfaces (see Body::SetHasCompliantShapes); not part of the saved binary state
+ 	bool					mAllowSleeping = true;											///< If this body can go to sleep or not
+ 	float					mFriction = 0.2f;												///< Friction of the body (dimensionless number, usually between 0 and 1, 0 = no friction, 1 = friction force equals force that presses the two bodies together). Note that bodies can have negative friction but the combined friction (see PhysicsSystem::SetCombineFriction) should never go below zero.
+ 	float					mRestitution = 0.0f;											///< Restitution of body (dimensionless number, usually between 0 and 1, 0 = completely inelastic collision response, 1 = completely elastic collision response). Note that bodies can have negative restitution but the combined restitution (see PhysicsSystem::SetCombineRestitution) should never go below zero.
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Body/BodyInterface.cpp b/thirdparty/jolt_physics/Jolt/Physics/Body/BodyInterface.cpp
+index 4a07993798..57c14b655b 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Body/BodyInterface.cpp
++++ b/thirdparty/jolt_physics/Jolt/Physics/Body/BodyInterface.cpp
+@@ -1023,6 +1023,32 @@ bool BodyInterface::GetUseManifoldReduction(const BodyID &inBodyID) const
+ 		return true;
+ }
+ 
++void BodyInterface::SetHasCompliantShapes(const BodyID &inBodyID, bool inHas)
++{
++	BodyLockWrite lock(*mBodyLockInterface, inBodyID);
++	if (lock.Succeeded())
++	{
++		Body &body = lock.GetBody();
++		if (body.IsRigidBody() && body.HasCompliantShapes() != inHas)
++		{
++			body.SetHasCompliantShapes(inHas);
++
++			// Flag collision cache invalid for this body
++			if (body.IsInBroadPhase())
++				mBodyManager->InvalidateContactCacheForBody(body);
++		}
++	}
++}
++
++bool BodyInterface::GetHasCompliantShapes(const BodyID &inBodyID) const
++{
++	BodyLockRead lock(*mBodyLockInterface, inBodyID);
++	if (lock.Succeeded())
++		return lock.GetBody().HasCompliantShapes();
++	else
++		return false;
++}
++
+ void BodyInterface::SetIsSensor(const BodyID &inBodyID, bool inIsSensor)
+ {
+ 	BodyLockWrite lock(*mBodyLockInterface, inBodyID);
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Body/BodyInterface.h b/thirdparty/jolt_physics/Jolt/Physics/Body/BodyInterface.h
+index cae78b2453..0523e2f6a1 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Body/BodyInterface.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Body/BodyInterface.h
+@@ -285,6 +285,11 @@ public:
+ 	///@{
+ 	void						SetUseManifoldReduction(const BodyID &inBodyID, bool inUseReduction);
+ 	bool						GetUseManifoldReduction(const BodyID &inBodyID) const;
++
++	// CRUMB: whether some of a body's shapes are compliant surfaces (Body::SetHasCompliantShapes). A change
++	// invalidates the body's contact cache, so no manifold of the wrong size is replayed.
++	void						SetHasCompliantShapes(const BodyID &inBodyID, bool inHas);
++	bool						GetHasCompliantShapes(const BodyID &inBodyID) const;
+ 	///@}
+ 
+ 	///@name Sensor
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Body/BodyManager.cpp b/thirdparty/jolt_physics/Jolt/Physics/Body/BodyManager.cpp
+index ebf524ba05..bd1d559f7d 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Body/BodyManager.cpp
++++ b/thirdparty/jolt_physics/Jolt/Physics/Body/BodyManager.cpp
+@@ -207,6 +207,8 @@ Body *BodyManager::AllocateBody(const BodyCreationSettings &inBodyCreationSettin
+ 		body->SetUseManifoldReduction(true);
+ 	if (inBodyCreationSettings.mApplyGyroscopicForce)
+ 		body->SetApplyGyroscopicForce(true);
++	if (inBodyCreationSettings.mHasCompliantShapes) // CRUMB
++		body->SetHasCompliantShapes(true);
+ 	if (inBodyCreationSettings.mEnhancedInternalEdgeRemoval)
+ 		body->SetEnhancedInternalEdgeRemoval(true);
+ 	SetBodyObjectLayerInternal(*body, inBodyCreationSettings.mObjectLayer);
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h b/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
+index 73cd684556..45e421f0a2 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
+@@ -35,6 +35,77 @@ public:
+ 	ContactPoints			mRelativeContactPointsOn2;			///< Contact points on the surface of shape 2 relative to mBaseOffset. If there's no penetration, this will be the same as mRelativeContactPointsOn1. If there is penetration they will be different.
+ };
+ 
++// CRUMB: a compliant (soft) contact's state carried from one step to the next, stored after the contact
++// points of the manifold's cache entry. It is reserved only for a manifold of a body with compliant
++// shapes (Body::HasCompliantShapes when the entry was made). Vectors are in body 2's local frame, as the
++// cache keeps the contact normal, so they keep their meaning when the next step picks other axes.
++struct SoftContactTail
++{
++	Float3					mFrictionImpulse;					// The friction rows' total impulse on body 2
++	Float3					mMoment;							// The tilt, roll and spin rows' total moment on body 2, about the patch centre
++	Float3					mShear;								// The pre-slip deflection: body 2's contact surface against body 1's
++	float					mNormalImpulse;						// The normal row's total impulse
++	float					mCoreImpulse;						// The core guard's total impulse
++	float					mSpinDeflection;					// The pre-slip twist about the normal (rad)
++	float					mEndSquash;							// The deepest overlap the solve left for the end of the step
++	uint32					mFlags;								// See EFlags
++	uint32					mActiveSet[6];						// A face patch's contact set, one bit per grid cell, for the next step's first pass
++	uint8					mGridLong;							// The grid the contact set belongs to
++	uint8					mGridShort;
++	uint16					mReserved;
++
++	enum EFlags : uint32
++	{
++		OnsetPending		= 1 << 0,							// The episode's first touch is still to be decided (set when the manifold is new)
++		Solved				= 1 << 1,							// A soft solve has written this tail
++	};
++};
++
++// CRUMB: a compliant patch for one manifold, built by the contact listener (OnContactAdded and
++// OnContactPersisted) through ContactSettings::mSoftPatch. When enabled, the solver replaces the
++// manifold's contact points by these rows: a normal row at the centre of pressure that applies the
++// patch law's force explicitly plus an implicit share, a core guard, tilt rows, a friction block (two
++// tangents and the spin) limited by the soft-finger ellipse, and rolling resistance rows. All values are
++// in the solver's units.
++struct SoftContactPatch
++{
++	bool					mEnabled = false;					// The listener built a patch; otherwise the manifold stays rigid
++	uint8					mClass = 0;							// 0 face, 1 line, 2 point
++	bool					mRigidStick = false;				// The friction rows stick rigidly (no pre-slip springs)
++	uint8					mNumTilt = 0;						// Rows about in-plane axes that carry tilt stiffness
++	uint8					mNumRoll = 0;						// Rows about in-plane axes that carry rolling resistance
++	RVec3					mCentre;							// Where the normal, friction and spin rows act (world); the deepest point when nothing presses
++	RVec3					mDeepest;							// The deepest point of the overlap, midway between the two surfaces (world)
++	Vec3					mTangent1 = Vec3::sZero();			// The patch's in-plane axes (world), tangent 2 = normal x tangent 1
++	Vec3					mTangent2 = Vec3::sZero();
++	float					mSquash = 0.0f;						// The overlap at mDeepest at the start of the step (negative: a gap)
++	float					mForce = 0.0f;						// The law's force at the start of the step, never negative
++	float					mNormalStiffness = 0.0f;			// d force / d squash at the start of the step
++	float					mLawCoefficient = 0.0f;				// F(s) = C s^n from first touch, for a first touch's predicted peak
++	float					mLawExponent = 1.0f;
++	float					mNormalDampingRatio = 0.0f;			// Damping ratio of the normal row (the law's exponent)
++	float					mDampingRatio = 0.0f;				// Damping ratio of the tilt, shear and spin rows (exponent 1)
++	float					mRestitution = 0.0f;				// The material's restitution, for a first touch the step cannot resolve
++	Vec3					mTiltAxis[2] = { Vec3::sZero(), Vec3::sZero() };
++	float					mTiltStiffness[2] = { 0.0f, 0.0f };
++	float					mTiltArmNeg[2] = { 0.0f, 0.0f };	// The moment about a tilt axis stays within the normal impulse times these
++	float					mTiltArmPos[2] = { 0.0f, 0.0f };
++	Vec3					mRollAxis[2] = { Vec3::sZero(), Vec3::sZero() };
++	float					mRollArm[2] = { 0.0f, 0.0f };		// Rolling resistance arm about each roll axis
++	float					mSpinRadius = 0.0f;					// The soft-finger ellipse's spin radius
++	float					mStaticFriction = 0.0f;
++	float					mSlidingFriction = 0.0f;
++	float					mShearStiffness = 0.0f;				// Pre-slip springs, per tangent and about the normal (0 with mRigidStick)
++	float					mSpinStiffness = 0.0f;
++	float					mRelaxationLength = 0.0f;			// The pre-slip deflection relaxes over this much rolling
++	float					mRollingRadius = 0.0f;				// Turns a relative spin about an in-plane axis into rolling speed
++	float					mArea = 0.0f;
++	float					mCoreGap = 0.0f;					// Layer left at mDeepest before the cores meet
++	uint32					mActiveSet[6] = { 0, 0, 0, 0, 0, 0 };	// A face patch's contact set, carried to the next step
++	uint8					mGridLong = 0;
++	uint8					mGridShort = 0;
++};
++
+ /// When a contact point is added or persisted, the callback gets a chance to override certain properties of the contact constraint.
+ /// The values are filled in with their defaults by the system so the callback doesn't need to modify anything, but it can if it wants to.
+ class ContactSettings
+@@ -53,6 +124,14 @@ public:
+ 	// on a hit the sweep path (continuous collision detection) resolves with these settings. It
+ 	// changes nothing the solver does.
+ 	bool					mReportSolved = false;
++	// CRUMB: the compliant contact. For a manifold of a body with compliant shapes the contact manager
++	// points mSoftPatch at a record the listener may fill (nullptr: this manifold cannot carry a patch)
++	// and mSoftTail at the manifold's tail from the last step (nullptr: a new episode). mIsSweepPath is
++	// set when the call comes from the sweep path (continuous collision detection), whose poses are not
++	// the time of impact: no patch is built there.
++	SoftContactPatch *		mSoftPatch = nullptr;
++	const SoftContactTail *	mSoftTail = nullptr;
++	bool					mIsSweepPath = false;
+ };
+ 
+ // CRUMB: what the solver applied to one manifold over the step, on body 2 (body 1 takes the opposite).
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ConstraintPart/SpringPart.h b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ConstraintPart/SpringPart.h
+index 0a8a4a9730..adb38544f0 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ConstraintPart/SpringPart.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ConstraintPart/SpringPart.h
+@@ -127,6 +127,27 @@ public:
+ 		}
+ 	}
+ 
++	// CRUMB: a compliant row's spring with an explicit preload (the soft contact). The row applies the law's
++	// force F explicitly, as the impulse h F, and an implicit share B = c + theta k h on the closing speed,
++	// so its impulse is h (F + B v_closing): softness 1 / (h B) and bias -F / B. When h B w is below
++	// inFixedEpsilon (no damping and no implicit share: the softness would be infinite and the bias 0/0)
++	// it returns false and leaves the outputs at a fixed row: the caller must apply h F once, with the
++	// row's clamp, and never turn the row rigid (that would delete the compliance it stands for).
++	static inline bool			CalculateSpringPropertiesWithPreload(float inDeltaTime, float inInvEffectiveMass, float inPreload, float inVelocityCoefficient, float inFixedEpsilon, float &outSoftness, float &outBias, float &outEffectiveMass)
++	{
++		if (!(inDeltaTime * inVelocityCoefficient * inInvEffectiveMass >= inFixedEpsilon))
++		{
++			outSoftness = 0.0f;
++			outBias = 0.0f;
++			outEffectiveMass = 0.0f;
++			return false;
++		}
++		outSoftness = 1.0f / (inDeltaTime * inVelocityCoefficient);
++		outBias = -inPreload / inVelocityCoefficient;
++		outEffectiveMass = 1.0f / (inInvEffectiveMass + outSoftness);
++		return true;
++	}
++
+ 	/// Returns if this spring is active
+ 	inline bool					IsActive() const
+ 	{
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
+index acb0985483..91db89d3e3 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
++++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
+@@ -304,16 +304,18 @@ const ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCac
+ 	return mCachedManifolds.Find(inKey, inKeyHash);
+ }
+ 
+-ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCache::Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints)
++ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCache::Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints, bool inSoftTail)
+ {
+ 	JPH_ASSERT(!mIsFinalized);
+-	MKeyValue *kv = mCachedManifolds.Create(ioContactAllocator, inKey, inKeyHash, CachedManifold::sGetRequiredExtraSize(inNumContactPoints));
++	MKeyValue *kv = mCachedManifolds.Create(ioContactAllocator, inKey, inKeyHash, CachedManifold::sGetRequiredExtraSize(inNumContactPoints, inSoftTail));
+ 	if (kv == nullptr)
+ 	{
+ 		ioContactAllocator.mErrors |= EPhysicsUpdateError::ManifoldCacheFull;
+ 		return nullptr;
+ 	}
+ 	kv->GetValue().mNumContactPoints = uint16(inNumContactPoints);
++	if (inSoftTail)
++		kv->GetValue().mFlags.fetch_or(uint16(CachedManifold::EFlags::SoftTail), memory_order_relaxed); // CRUMB
+ 	++ioContactAllocator.mNumManifolds;
+ 	return kv;
+ }
+@@ -479,12 +481,20 @@ void ContactConstraintManager::ManifoldCache::SaveState(StateRecorder &inStream,
+ 			// Write amount of contacts
+ 			inStream.Write(cm.mNumContactPoints);
+ 
++			// CRUMB: whether a soft-contact tail follows the points
++			bool soft_tail = cm.HasSoftTail();
++			inStream.Write(soft_tail);
++
+ 			// Write manifold
+ 			cm.SaveState(inStream);
+ 
+ 			// Write contact points
+ 			for (uint32 i = 0; i < cm.mNumContactPoints; ++i)
+ 				cm.mContactPoints[i].SaveState(inStream);
++
++			// CRUMB: and the tail
++			if (soft_tail)
++				inStream.Write(*cm.GetSoftTail());
+ 		}
+ 	}
+ 
+@@ -586,8 +596,14 @@ bool ContactConstraintManager::ManifoldCache::RestoreState(const ManifoldCache &
+ 					num_contact_points = all_m[j]->GetValue().mNumContactPoints;
+ 				inStream.Read(num_contact_points);
+ 
++				// CRUMB: whether a soft-contact tail follows the points
++				bool soft_tail = false;
++				if (inStream.IsValidating() && j < all_m.size())
++					soft_tail = all_m[j]->GetValue().HasSoftTail();
++				inStream.Read(soft_tail);
++
+ 				// Read manifold
+-				MKeyValue *m_kv = Create(contact_allocator, sub_shape_key, sub_shape_key_hash, num_contact_points);
++				MKeyValue *m_kv = Create(contact_allocator, sub_shape_key, sub_shape_key_hash, num_contact_points, soft_tail);
+ 				if (m_kv == nullptr)
+ 				{
+ 					// Out of cache space
+@@ -597,7 +613,7 @@ bool ContactConstraintManager::ManifoldCache::RestoreState(const ManifoldCache &
+ 				CachedManifold &cm = m_kv->GetValue();
+ 				if (inStream.IsValidating() && j < all_m.size())
+ 				{
+-					memcpy(&cm, &all_m[j]->GetValue(), CachedManifold::sGetRequiredTotalSize(num_contact_points));
++					memcpy(&cm, &all_m[j]->GetValue(), CachedManifold::sGetRequiredTotalSize(num_contact_points) + (soft_tail? sizeof(SoftContactTail) : 0));
+ 					cm.mNumContactPoints = uint16(num_contact_points); // Restore num contact points
+ 				}
+ 				cm.RestoreState(inStream);
+@@ -607,6 +623,10 @@ bool ContactConstraintManager::ManifoldCache::RestoreState(const ManifoldCache &
+ 				// Read contact points
+ 				for (uint32 k = 0; k < num_contact_points; ++k)
+ 					cm.mContactPoints[k].RestoreState(inStream);
++
++				// CRUMB: and the tail
++				if (soft_tail)
++					inStream.Read(*cm.GetSoftTail());
+ 			}
+ 			bp.mFirstCachedManifold = handle;
+ 		}
+@@ -623,10 +643,17 @@ bool ContactConstraintManager::ManifoldCache::RestoreState(const ManifoldCache &
+ 				inStream.Read(sub_shape_key);
+ 				uint16 num_contact_points;
+ 				inStream.Read(num_contact_points);
++				bool soft_tail = false; // CRUMB
++				inStream.Read(soft_tail);
+ 				CachedManifold cm;
+ 				cm.RestoreState(inStream);
+ 				for (uint32 k = 0; k < num_contact_points; ++k)
+ 					cm.mContactPoints[0].RestoreState(inStream);
++				if (soft_tail)
++				{
++					SoftContactTail tail;
++					inStream.Read(tail);
++				}
+ 			}
+ 		}
+ 	}
+@@ -700,8 +727,8 @@ void ContactConstraintManager::Init(uint inMaxBodyPairs, uint inMaxContactConstr
+ 	mMaxConstraints = min(inMaxContactConstraints, cMaxContactConstraintsLimit);
+ 	JPH_ASSERT(mMaxConstraints == inMaxContactConstraints, "Cannot support this many contact constraints!");
+ 
+-	// Calculate worst case cache usage
+-	constexpr uint cMaxManifoldSizePerConstraint = sizeof(CachedManifold) + (MaxContactPoints - 1) * sizeof(CachedContactPoint);
++	// Calculate worst case cache usage (CRUMB: with a soft-contact tail)
++	constexpr uint cMaxManifoldSizePerConstraint = sizeof(CachedManifold) + (MaxContactPoints - 1) * sizeof(CachedContactPoint) + sizeof(SoftContactTail);
+ 	static_assert(cMaxManifoldSizePerConstraint < sizeof(ContactConstraint)); // If not true, then the next line can overflow
+ 	uint cached_manifolds_size = mMaxConstraints * cMaxManifoldSizePerConstraint;
+ 
+@@ -718,6 +745,13 @@ void ContactConstraintManager::PrepareConstraintBuffer(PhysicsUpdateContext *inC
+ 	// Allocate temporary constraint buffer
+ 	JPH_ASSERT(mConstraints == nullptr);
+ 	mConstraints = (ContactConstraint *)inContext->mTempAllocator->Allocate(mMaxConstraints * sizeof(ContactConstraint));
++
++	// CRUMB: and the soft patches' side table, freed before the constraints (FinishConstraintBuffer)
++	JPH_ASSERT(mSoftPatches == nullptr);
++	if (mMaxSoftPatches > 0)
++		mSoftPatches = (SoftPatchConstraint *)inContext->mTempAllocator->Allocate(mMaxSoftPatches * sizeof(SoftPatchConstraint));
++	mNumSoftPatches = 0;
++	mSoftStats = SoftContactStats();
+ }
+ 
+ template <EMotionType Type1, EMotionType Type2>
+@@ -810,6 +844,11 @@ void ContactConstraintManager::GetContactsFromCache(ContactAllocator &ioContactA
+ 	outConstraintCreated = false;
+ 	outPairHandled = false;
+ 
++	// CRUMB: a body with compliant shapes always has its contacts built from the current poses: its patch is
++	// the law at this step's squash, so a cached manifold would replay a stale one
++	if (inBody1.HasCompliantShapes() || inBody2.HasCompliantShapes())
++		return;
++
+ 	// Swap bodies so that body 1 id < body 2 id
+ 	Body *body1, *body2;
+ 	if (inBody1.GetID() < inBody2.GetID())
+@@ -1057,11 +1096,14 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
+ 	JPH_ASSERT(num_contact_points <= MaxContactPoints);
+ 	JPH_ASSERT(num_contact_points == (int)inManifold.mRelativeContactPointsOn2.size());
+ 
++	// CRUMB: a manifold of a body with compliant shapes reserves a soft-contact tail after its points
++	bool soft_tail = inBody1.HasCompliantShapes() || inBody2.HasCompliantShapes();
++
+ 	// Reserve space for new contact cache entry
+ 	// Note that for dynamic vs dynamic we always require the first body to have a lower body id to get a consistent key
+ 	// under which to look up the contact
+ 	ManifoldCache &write_cache = mCache[mCacheWriteIdx];
+-	MKeyValue *new_manifold_kv = write_cache.Create(ioContactAllocator, key, key_hash, num_contact_points);
++	MKeyValue *new_manifold_kv = write_cache.Create(ioContactAllocator, key, key_hash, num_contact_points, soft_tail);
+ 	if (new_manifold_kv == nullptr)
+ 		return false; // Out of cache space
+ 	CachedManifold *new_manifold = &new_manifold_kv->GetValue();
+@@ -1076,19 +1118,30 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
+ 	settings.mCombinedRestitution = mCombineRestitution(inBody1, inManifold.mSubShapeID1, inBody2, inManifold.mSubShapeID2);
+ 	settings.mIsSensor = inBody1.IsSensor() || inBody2.IsSensor();
+ 
++	// CRUMB: the record the listener may fill with a soft patch
++	SoftContactPatch soft_patch;
++	if (soft_tail)
++		settings.mSoftPatch = &soft_patch;
++
+ 	// Get the contact points for the old cache entry
+ 	const ManifoldCache &read_cache = mCache[mCacheWriteIdx ^ 1];
+ 	const MKeyValue *old_manifold_kv = read_cache.Find(key, key_hash);
+ 	const CachedContactPoint *ccp_start;
+ 	const CachedContactPoint *ccp_end;
++	const SoftContactTail *old_tail = nullptr; // CRUMB
+ 	if (old_manifold_kv != nullptr)
+ 	{
++		// CRUMB: last step's tail, when this manifold carried one
++		const CachedManifold *old_manifold = &old_manifold_kv->GetValue();
++		if (soft_tail && old_manifold->HasSoftTail() && old_manifold->mNumContactPoints > 0)
++			old_tail = old_manifold->GetSoftTail();
++		settings.mSoftTail = old_tail;
++
+ 		// Call point persisted listener
+ 		if (mContactListener != nullptr)
+ 			mContactListener->OnContactPersisted(inBody1, inBody2, inManifold, settings);
+ 
+ 		// Fetch the contact points from the old manifold
+-		const CachedManifold *old_manifold = &old_manifold_kv->GetValue();
+ 		ccp_start = old_manifold->mContactPoints;
+ 		ccp_end = ccp_start + old_manifold->mNumContactPoints;
+ 
+@@ -1106,6 +1159,21 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
+ 		ccp_end = nullptr;
+ 	}
+ 
++	// CRUMB: this step's tail starts as last step's; a new episode starts with its first touch undecided
++	SoftContactTail *new_tail = nullptr;
++	if (soft_tail)
++	{
++		new_tail = new_manifold->GetSoftTail();
++		if (old_tail != nullptr)
++			memcpy(new_tail, old_tail, sizeof(SoftContactTail));
++		else
++		{
++			memset(new_tail, 0, sizeof(SoftContactTail));
++			new_tail->mFlags = SoftContactTail::OnsetPending;
++		}
++		new_tail->mFlags &= ~uint32(SoftContactTail::Solved);
++	}
++
+ 	// Get inverse transform for body 1
+ 	RMat44 inverse_transform_body1 = inBody1.GetInverseCenterOfMassTransform();
+ 
+@@ -1126,6 +1194,7 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
+ 			// Manifold has been created already, we're not filling it in, so we need to reset the contact number of points.
+ 			// Note that we don't hook it up to the body pair cache so that it won't be used as a cache during the next simulation.
+ 			new_manifold->mNumContactPoints = 0;
++			new_manifold->mFlags.fetch_and(uint16(~uint16(CachedManifold::EFlags::SoftTail)), memory_order_relaxed); // CRUMB: the tail moved with the point count
+ 			return false;
+ 		}
+ 
+@@ -1185,12 +1254,38 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
+ 			inv_i2 = Mat44::sZero();
+ 		}
+ 
++		// CRUMB: a soft patch replaces the rows of the manifold's points. The points are still cached, with no
++		// impulses: they serve the removal callbacks and nothing else.
++		bool soft_solved = false;
++		if (soft_tail && soft_patch.mEnabled)
++		{
++			uint32 soft_idx = mSoftPatches != nullptr? mNumSoftPatches++ : mMaxSoftPatches;
++			if (soft_idx < mMaxSoftPatches)
++			{
++				constraint.mSoftPatchIndex = soft_idx;
++				bool warm = old_tail != nullptr && (old_tail->mFlags & SoftContactTail::Solved) != 0;
++				SetupSoftPatch(constraint, mSoftPatches[soft_idx], soft_patch, *new_tail, warm, inv_m1, inv_i1, inv_m2, inv_i2, delta_time, gravity);
++				for (int i = 0; i < num_contact_points; ++i)
++				{
++					CachedContactPoint &cp = new_manifold->mContactPoints[i];
++					Vec3(inverse_transform_body1 * (inManifold.mBaseOffset + inManifold.mRelativeContactPointsOn1[i])).StoreFloat3(&cp.mPosition1);
++					Vec3(inverse_transform_body2 * (inManifold.mBaseOffset + inManifold.mRelativeContactPointsOn2[i])).StoreFloat3(&cp.mPosition2);
++					cp.mNonPenetrationLambda = 0.0f;
++					cp.mFrictionLambda[0] = 0.0f;
++					cp.mFrictionLambda[1] = 0.0f;
++				}
++				soft_solved = true;
++			}
++			else
++				++mSoftStats.mOverflow;
++		}
++
+ 		// Calculate tangents
+ 		Vec3 t1, t2;
+ 		constraint.GetTangents(t1, t2);
+ 
+-		constraint.mContactPoints.resize(num_contact_points);
+-		for (int i = 0; i < num_contact_points; ++i)
++		constraint.mContactPoints.resize(soft_solved? 0 : num_contact_points);
++		for (int i = 0; i < (soft_solved? 0 : num_contact_points); ++i)
+ 		{
+ 			// Convert to world space and set positions
+ 			WorldContactPoint &wcp = constraint.mContactPoints[i];
+@@ -1369,6 +1464,7 @@ void ContactConstraintManager::OnCCDContactAdded(ContactAllocator &ioContactAllo
+ 	outSettings.mCombinedFriction = mCombineFriction(inBody1, inManifold.mSubShapeID1, inBody2, inManifold.mSubShapeID2);
+ 	outSettings.mCombinedRestitution = mCombineRestitution(inBody1, inManifold.mSubShapeID1, inBody2, inManifold.mSubShapeID2);
+ 	outSettings.mIsSensor = false; // For now, no sensors are supported during CCD
++	outSettings.mIsSweepPath = true; // CRUMB: the listener builds no soft patch on these poses
+ 
+ 	// The remainder of this function only deals with calling contact callbacks, if there's no contact callback we also don't need to do this work
+ 	if (mContactListener != nullptr)
+@@ -1554,6 +1650,17 @@ void ContactConstraintManager::WarmStartVelocityConstraints(const uint32 *inCons
+ 		EMotionType motion_type2 = body2.GetMotionType();
+ 		MotionProperties *motion_properties2 = body2.GetMotionPropertiesUnchecked();
+ 
++		// CRUMB: a soft patch warm starts its own rows
++		if (constraint.mSoftPatchIndex != cNoSoftPatch)
++		{
++			WarmStartSoftPatch(constraint, inWarmStartImpulseRatio);
++			if (motion_type2 == EMotionType::Dynamic)
++				ioCallback(motion_properties2);
++			if (motion_type1 == EMotionType::Dynamic)
++				ioCallback(motion_properties1);
++			continue;
++		}
++
+ 		// Dispatch to the correct templated form
+ 		// Note: Warm starting doesn't differentiate between kinematic/static bodies so we handle both as static bodies
+ 		if (motion_type1 == EMotionType::Dynamic)
+@@ -1657,6 +1764,13 @@ bool ContactConstraintManager::SolveVelocityConstraints(const uint32 *inConstrai
+ 		EMotionType motion_type2 = body2.GetMotionType();
+ 		MotionProperties *motion_properties2 = body2.GetMotionPropertiesUnchecked();
+ 
++		// CRUMB: a soft patch solves its own rows
++		if (constraint.mSoftPatchIndex != cNoSoftPatch)
++		{
++			any_impulse_applied |= SolveSoftPatch(constraint);
++			continue;
++		}
++
+ 		// Dispatch to the correct templated form
+ 		switch (motion_type1)
+ 		{
+@@ -1707,6 +1821,13 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintId
+ 	{
+ 		const ContactConstraint &constraint = mConstraints[*constraint_idx];
+ 
++		// CRUMB: a soft patch writes its tail (and its report)
++		if (constraint.mSoftPatchIndex != cNoSoftPatch)
++		{
++			StoreSoftPatch(constraint);
++			continue;
++		}
++
+ 		for (const WorldContactPoint &wcp : constraint.mContactPoints)
+ 		{
+ 			wcp.mContactPoint->mNonPenetrationLambda = wcp.mNonPenetrationConstraint.GetTotalLambda();
+@@ -1792,6 +1913,14 @@ bool ContactConstraintManager::SolvePositionConstraints(const uint32 *inConstrai
+ 	{
+ 		ContactConstraint &constraint = mConstraints[*constraint_idx];
+ 
++		// CRUMB: a soft patch corrects only its core guard (and a first touch solved as an impact)
++		if (constraint.mSoftPatchIndex != cNoSoftPatch)
++		{
++			if (SolveSoftPatchPosition(constraint))
++				any_impulse_applied = true;
++			continue;
++		}
++
+ 		// Fetch bodies
+ 		Body &body1 = *constraint.mBody1;
+ 		Body &body2 = *constraint.mBody2;
+@@ -1833,10 +1962,18 @@ void ContactConstraintManager::RecycleConstraintBuffer()
+ {
+ 	// Reset constraint array
+ 	mNumConstraints = 0;
++	mNumSoftPatches = 0; // CRUMB
+ }
+ 
+ void ContactConstraintManager::FinishConstraintBuffer()
+ {
++	// CRUMB: the soft patches' side table was allocated after the constraints, so it is freed first
++	if (mSoftPatches != nullptr)
++	{
++		mUpdateContext->mTempAllocator->Free(mSoftPatches, mMaxSoftPatches * sizeof(SoftPatchConstraint));
++		mSoftPatches = nullptr;
++	}
++
+ 	// Free constraints buffer
+ 	mUpdateContext->mTempAllocator->Free(mConstraints, mMaxConstraints * sizeof(ContactConstraint));
+ 	mConstraints = nullptr;
+@@ -1865,4 +2002,1089 @@ bool ContactConstraintManager::RestoreState(StateRecorder &inStream, const State
+ 	return success;
+ }
+ 
++////////////////////////////////////////////////////////////////////////////////////////////////////////
++// CRUMB: the compliant contact (soft patches)
++//
++// A manifold whose listener built a SoftContactPatch is solved as a few rows in place of its contact
++// points: a normal row at the centre of pressure that applies the patch law's force at the start-of-step
++// squash explicitly (h F) and adds an implicit share B = c + theta k h on the closing speed, a core guard
++// at the deepest point (a rigid speculative row against the backing), tilt rows (compliant, about in-plane
++// axes through the centre), a friction block (two tangents and the spin, compliant pre-slip springs or a
++// rigid stick, limited together by the soft-finger ellipse) and rolling resistance rows (rigid, saturating
++// at the rolling arm times the normal impulse). theta comes from the pair-sum bound over each island's
++// soft rows (FinalizeSoftPatches), the rows are warm started from last step's impulses and then corrected
++// together per soft cluster (WarmStartSoftClusters), and the episode rule decides a first touch the step
++// cannot resolve as an impact with the material's restitution.
++////////////////////////////////////////////////////////////////////////////////////////////////////////
++
++// A compliant row whose h B w is below this is applied as a fixed impulse (no damping and no implicit share)
++static constexpr float cSoftFixedEpsilon = 1.0e-6f;
++
++// The block warm start solves at most this many compliant rows together; a larger cluster patch by patch
++static constexpr int cSoftBlockRowCap = 64;
++
++// The most soft patches one island's clusters are formed over, and the most dynamic bodies its pair sums
++// keep apart; beyond them a patch is its own cluster and a row falls back to its own bound
++static constexpr int cSoftMaxClusterPatches = 256;
++static constexpr int cSoftMaxSumBodies = 512;
++
++// Bisections of the soft-finger projection's multiplier (a fixed count, so the solve repeats bit for bit)
++static constexpr int cSoftEllipseBisections = 48;
++
++// The smallest spin radius the ellipse divides by (mm in CRUMB's units: one micrometre)
++static constexpr double cSoftMinSpinRadius = 1.0e-3;
++
++// The two bodies of a soft patch as its rows see them
++struct SoftPatchBodies
++{
++	MotionProperties *		mWrite1 = nullptr;			// set for a dynamic body: the rows change its velocity
++	MotionProperties *		mWrite2 = nullptr;
++	const MotionProperties *mRead1 = nullptr;			// set unless the body is static: the rows read its velocity
++	const MotionProperties *mRead2 = nullptr;
++	float					mInvMass1 = 0.0f;			// the contact's inverse masses, zero unless dynamic
++	float					mInvMass2 = 0.0f;
++};
++
++static inline SoftPatchBodies sSoftPatchBodies(Body &ioBody1, float inInvMass1, Body &ioBody2, float inInvMass2)
++{
++	SoftPatchBodies b;
++	if (ioBody1.IsDynamic())
++	{
++		b.mWrite1 = ioBody1.GetMotionPropertiesUnchecked();
++		b.mInvMass1 = inInvMass1;
++	}
++	if (!ioBody1.IsStatic())
++		b.mRead1 = ioBody1.GetMotionPropertiesUnchecked();
++	if (ioBody2.IsDynamic())
++	{
++		b.mWrite2 = ioBody2.GetMotionPropertiesUnchecked();
++		b.mInvMass2 = inInvMass2;
++	}
++	if (!ioBody2.IsStatic())
++		b.mRead2 = ioBody2.GetMotionPropertiesUnchecked();
++	return b;
++}
++
++// J v of a row: the opening rate (linear rows) or the relative spin about the axis (angular rows)
++template <class Row>
++static inline float sSoftRowVelocity(const Row &inRow, const SoftPatchBodies &inB)
++{
++	float jv = 0.0f;
++	if (inB.mRead2 != nullptr)
++		jv += inRow.mLinear.Dot(inB.mRead2->GetLinearVelocity()) + inRow.mAngular2.Dot(inB.mRead2->GetAngularVelocity());
++	if (inB.mRead1 != nullptr)
++		jv -= inRow.mLinear.Dot(inB.mRead1->GetLinearVelocity()) + inRow.mAngular1.Dot(inB.mRead1->GetAngularVelocity());
++	return jv;
++}
++
++// Apply an impulse inLambda along a row
++template <class Row>
++static inline void sSoftRowApply(const Row &inRow, const SoftPatchBodies &inB, float inLambda)
++{
++	if (inLambda == 0.0f)
++		return;
++	if (inB.mWrite1 != nullptr)
++	{
++		inB.mWrite1->SubLinearVelocityStep((inLambda * inB.mInvMass1) * inRow.mLinear);
++		inB.mWrite1->SubAngularVelocityStep(inLambda * inRow.mInvIAngular1);
++	}
++	if (inB.mWrite2 != nullptr)
++	{
++		inB.mWrite2->AddLinearVelocityStep((inLambda * inB.mInvMass2) * inRow.mLinear);
++		inB.mWrite2->AddAngularVelocityStep(inLambda * inRow.mInvIAngular2);
++	}
++}
++
++template <class Row>
++static inline void sSoftRowReset(Row &outRow)
++{
++	outRow.mLinear = Vec3::sZero();
++	outRow.mAngular1 = Vec3::sZero();
++	outRow.mAngular2 = Vec3::sZero();
++	outRow.mInvIAngular1 = Vec3::sZero();
++	outRow.mInvIAngular2 = Vec3::sZero();
++	outRow.mInvEffectiveMass = 0.0f;
++	outRow.mEffectiveMass = 0.0f;
++	outRow.mSoftness = 0.0f;
++	outRow.mBias = 0.0f;
++	outRow.mTotalLambda = 0.0f;
++	outRow.mStiffness = 0.0f;
++	outRow.mDampingRatio = 0.0f;
++	outRow.mPreload = 0.0f;
++	outRow.mTheta = 0.0f;
++	outRow.mMode = ContactConstraintManager::SoftRowInactive;
++}
++
++// A linear row along inAxis at the point r1 from body 1's centre of mass and r2 from body 2's
++template <class Row>
++static inline void sSoftRowLinear(Row &ioRow, Vec3Arg inAxis, Vec3Arg inR1, Vec3Arg inR2, float inInvMass1, Mat44Arg inInvI1, float inInvMass2, Mat44Arg inInvI2)
++{
++	ioRow.mLinear = inAxis;
++	ioRow.mAngular1 = inR1.Cross(inAxis);
++	ioRow.mAngular2 = inR2.Cross(inAxis);
++	ioRow.mInvIAngular1 = inInvI1.Multiply3x3(ioRow.mAngular1);
++	ioRow.mInvIAngular2 = inInvI2.Multiply3x3(ioRow.mAngular2);
++	ioRow.mInvEffectiveMass = inInvMass1 + inInvMass2 + ioRow.mAngular1.Dot(ioRow.mInvIAngular1) + ioRow.mAngular2.Dot(ioRow.mInvIAngular2);
++}
++
++// An angular row about inAxis
++template <class Row>
++static inline void sSoftRowAngular(Row &ioRow, Vec3Arg inAxis, Mat44Arg inInvI1, Mat44Arg inInvI2)
++{
++	ioRow.mLinear = Vec3::sZero();
++	ioRow.mAngular1 = inAxis;
++	ioRow.mAngular2 = inAxis;
++	ioRow.mInvIAngular1 = inInvI1.Multiply3x3(inAxis);
++	ioRow.mInvIAngular2 = inInvI2.Multiply3x3(inAxis);
++	ioRow.mInvEffectiveMass = inAxis.Dot(ioRow.mInvIAngular1) + inAxis.Dot(ioRow.mInvIAngular2);
++}
++
++// A velocity row with a bias, or no row when nothing can move along it
++template <class Row>
++static inline void sSoftRowRigid(Row &ioRow, float inBias)
++{
++	if (ioRow.mInvEffectiveMass > 0.0f)
++	{
++		ioRow.mMode = ContactConstraintManager::SoftRowRigid;
++		ioRow.mEffectiveMass = 1.0f / ioRow.mInvEffectiveMass;
++		ioRow.mSoftness = 0.0f;
++		ioRow.mBias = inBias;
++	}
++	else
++		ioRow.mMode = ContactConstraintManager::SoftRowInactive;
++}
++
++// A compliant row: its law's stiffness, damping ratio and explicit force (its softness is set per island)
++template <class Row>
++static inline void sSoftRowCompliant(Row &ioRow, float inStiffness, float inDampingRatio, float inPreload)
++{
++	if (ioRow.mInvEffectiveMass > 0.0f && inStiffness > 0.0f)
++	{
++		ioRow.mMode = ContactConstraintManager::SoftRowCompliant;
++		ioRow.mStiffness = inStiffness;
++		ioRow.mDampingRatio = max(inDampingRatio, 0.0f);
++		ioRow.mPreload = inPreload;
++	}
++	else
++		ioRow.mMode = ContactConstraintManager::SoftRowInactive;
++}
++
++// One sweep of a row (rigid or compliant) with its total clamped to [inMin, inMax]; returns the impulse applied
++template <class Row>
++static inline float sSoftRowSolve(Row &ioRow, const SoftPatchBodies &inB, float inMin, float inMax)
++{
++	float jv = sSoftRowVelocity(ioRow, inB);
++	float lambda = -ioRow.mEffectiveMass * (jv + ioRow.mBias + ioRow.mSoftness * ioRow.mTotalLambda);
++	float total = Clamp(ioRow.mTotalLambda + lambda, inMin, inMax);
++	lambda = total - ioRow.mTotalLambda;
++	ioRow.mTotalLambda = total;
++	sSoftRowApply(ioRow, inB, lambda);
++	return lambda;
++}
++
++// J_i M^-1 J_j^T for two rows on the same two bodies
++template <class Row>
++static inline double sSoftRowCoupling(const Row &inI, const Row &inJ, const SoftPatchBodies &inB)
++{
++	return double(inB.mInvMass1 + inB.mInvMass2) * double(inI.mLinear.Dot(inJ.mLinear))
++		+ double(inI.mAngular1.Dot(inJ.mInvIAngular1)) + double(inI.mAngular2.Dot(inJ.mInvIAngular2));
++}
++
++// Solve A x = b in place (A is n x n, row major) by Gaussian elimination with partial pivoting, in a fixed
++// order; returns false (x zero) when A is singular
++static bool sSoftSolveDense(double *ioA, double *ioB, int inN, double *outX)
++{
++	for (int col = 0; col < inN; ++col)
++	{
++		int pivot = col;
++		double best = abs(ioA[col * inN + col]);
++		for (int row = col + 1; row < inN; ++row)
++		{
++			double v = abs(ioA[row * inN + col]);
++			if (v > best)
++			{
++				best = v;
++				pivot = row;
++			}
++		}
++		if (!(best > 0.0))
++		{
++			for (int i = 0; i < inN; ++i)
++				outX[i] = 0.0;
++			return false;
++		}
++		if (pivot != col)
++		{
++			for (int k = 0; k < inN; ++k)
++				std::swap(ioA[col * inN + k], ioA[pivot * inN + k]);
++			std::swap(ioB[col], ioB[pivot]);
++		}
++		double inv = 1.0 / ioA[col * inN + col];
++		for (int row = col + 1; row < inN; ++row)
++		{
++			double f = ioA[row * inN + col] * inv;
++			if (f == 0.0)
++				continue;
++			for (int k = col; k < inN; ++k)
++				ioA[row * inN + k] -= f * ioA[col * inN + k];
++			ioB[row] -= f * ioB[col];
++		}
++	}
++	for (int row = inN - 1; row >= 0; --row)
++	{
++		double s = ioB[row];
++		for (int k = row + 1; k < inN; ++k)
++			s -= ioA[row * inN + k] * outX[k];
++		outX[row] = s / ioA[row * inN + row];
++	}
++	return true;
++}
++
++// The soft-finger limit (t1 / (mu L))^2 + (t2 / (mu L))^2 + (spin / (mu L r_s))^2 <= 1 on the friction block's
++// total impulse. Inside it the impulse is unchanged. Outside it, the maximal-dissipation step in the block's
++// metric K: l = (K + nu D)^-1 K l*, with the multiplier nu found by a fixed count of bisections in log space.
++// Returns true when it projected (the block slides).
++static bool sSoftFingerProject(const double inK[9], double ioLambda[3], double inMuL, double inSpinRadius)
++{
++	if (!(inMuL > 0.0))
++	{
++		ioLambda[0] = ioLambda[1] = ioLambda[2] = 0.0;
++		return true;
++	}
++	double r = max(inSpinRadius, cSoftMinSpinRadius);
++	double D[3] = { 1.0 / (inMuL * inMuL), 1.0 / (inMuL * inMuL), 1.0 / ((inMuL * r) * (inMuL * r)) };
++	double q = ioLambda[0] * ioLambda[0] * D[0] + ioLambda[1] * ioLambda[1] * D[1] + ioLambda[2] * ioLambda[2] * D[2];
++	if (q <= 1.0)
++		return false;
++	double kl[3];
++	for (int i = 0; i < 3; ++i)
++		kl[i] = inK[3 * i] * ioLambda[0] + inK[3 * i + 1] * ioLambda[1] + inK[3 * i + 2] * ioLambda[2];
++	double scale = (inK[0] + inK[4] + inK[8]) / (D[0] + D[1] + D[2]);
++	double lo = -40.0, hi = 40.0;
++	double x[3] = { 0.0, 0.0, 0.0 };
++	for (int it = 0; it <= cSoftEllipseBisections; ++it)
++	{
++		bool last = it == cSoftEllipseBisections;
++		double mid = last? hi : 0.5 * (lo + hi);
++		double nu = std::exp(mid) * scale;
++		double A[9];
++		for (int i = 0; i < 9; ++i)
++			A[i] = inK[i];
++		A[0] += nu * D[0];
++		A[4] += nu * D[1];
++		A[8] += nu * D[2];
++		double b[3] = { kl[0], kl[1], kl[2] };
++		sSoftSolveDense(A, b, 3, x);
++		if (last)
++			break;
++		if (x[0] * x[0] * D[0] + x[1] * x[1] * D[1] + x[2] * x[2] * D[2] > 1.0)
++			lo = mid;
++		else
++			hi = mid;
++	}
++	ioLambda[0] = x[0];
++	ioLambda[1] = x[1];
++	ioLambda[2] = x[2];
++	return true;
++}
++
++void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, SoftPatchConstraint &outPatch, const SoftContactPatch &inPatch, SoftContactTail &ioTail, bool inWarm, float inInvM1, Mat44Arg inInvI1, float inInvM2, Mat44Arg inInvI2, float inDeltaTime, Vec3Arg inGravity)
++{
++	Body &body1 = *ioConstraint.mBody1;
++	Body &body2 = *ioConstraint.mBody2;
++	SoftPatchConstraint &p = *new (&outPatch) SoftPatchConstraint();
++	SoftPatchBodies b = sSoftPatchBodies(body1, inInvM1, body2, inInvM2);
++
++	sSoftRowReset(p.mNormal);
++	sSoftRowReset(p.mCore);
++	for (SoftRow &r : p.mFriction)
++		sSoftRowReset(r);
++	for (SoftRow &r : p.mTilt)
++		sSoftRowReset(r);
++	for (SoftRow &r : p.mRoll)
++		sSoftRowReset(r);
++
++	Vec3 n = ioConstraint.GetWorldSpaceNormal();
++	Vec3 t1 = inPatch.mTangent1;
++	Vec3 t2 = inPatch.mTangent2;
++	p.mNormalAxis = n;
++	p.mTangent1 = t1;
++	p.mTangent2 = t2;
++	p.mCentre = inPatch.mCentre;
++	p.mTail = &ioTail;
++	p.mDeltaTime = inDeltaTime;
++	p.mSquash = inPatch.mSquash;
++	p.mLayer = inPatch.mCoreGap + inPatch.mSquash;
++	p.mNumTilt = uint8(min<int>(inPatch.mNumTilt, 2));
++	p.mNumRoll = uint8(min<int>(inPatch.mNumRoll, 2));
++	for (int i = 0; i < 2; ++i)
++	{
++		p.mTiltArmNeg[i] = max(inPatch.mTiltArmNeg[i], 0.0f);
++		p.mTiltArmPos[i] = max(inPatch.mTiltArmPos[i], 0.0f);
++		p.mRollArm[i] = max(inPatch.mRollArm[i], 0.0f);
++	}
++	p.mSpinRadius = max(inPatch.mSpinRadius, 0.0f);
++	p.mStaticFriction = max(inPatch.mStaticFriction, 0.0f);
++	p.mSlidingFriction = Clamp(inPatch.mSlidingFriction, 0.0f, p.mStaticFriction);
++	p.mShearStiffness = max(inPatch.mShearStiffness, 0.0f);
++	p.mSpinStiffness = max(inPatch.mSpinStiffness, 0.0f);
++	p.mRelaxationLength = max(inPatch.mRelaxationLength, 0.0f);
++	p.mRollingRadius = max(inPatch.mRollingRadius, 0.0f);
++	p.mArea = max(inPatch.mArea, 0.0f);
++	p.mClass = inPatch.mClass;
++	p.mImpact = false;
++	p.mDecided = false;
++	p.mGap = inPatch.mSquash <= 0.0f;
++	p.mRigidStick = inPatch.mRigidStick || p.mShearStiffness <= 0.0f;
++	p.mFrictionFixed = false;
++	p.mSliding = false;
++	p.mWarm = inWarm;
++	for (double &k : p.mFrictionMatrix)
++		k = 0.0;
++
++	// The deepest point on each surface, kept in each body's frame for the position pass
++	Vec3 deep_offset = (0.5f * inPatch.mSquash) * n;
++	Vec3(body1.GetInverseCenterOfMassTransform() * (inPatch.mDeepest + deep_offset)).StoreFloat3(&p.mDeepLocal1);
++	Vec3(body2.GetInverseCenterOfMassTransform() * (inPatch.mDeepest - deep_offset)).StoreFloat3(&p.mDeepLocal2);
++
++	++mSoftStats.mPatches;
++
++	RVec3 com1 = body1.GetCenterOfMassPosition();
++	RVec3 com2 = body2.GetCenterOfMassPosition();
++	Vec3 r1 = Vec3(inPatch.mCentre - com1);
++	Vec3 r2 = Vec3(inPatch.mCentre - com2);
++	Vec3 rd1 = Vec3(inPatch.mDeepest - com1);
++	Vec3 rd2 = Vec3(inPatch.mDeepest - com2);
++
++	// The carried pre-slip deflection on this step's tangents (the tail keeps it in body 2's frame)
++	if (inWarm)
++	{
++		Vec3 shear = body2.GetRotation() * Vec3::sLoadFloat3Unsafe(ioTail.mShear);
++		p.mShear[0] = shear.Dot(t1);
++		p.mShear[1] = shear.Dot(t2);
++		p.mSpin = ioTail.mSpinDeflection;
++	}
++	else
++	{
++		p.mShear[0] = p.mShear[1] = 0.0f;
++		p.mSpin = 0.0f;
++	}
++
++	// The approach at the deepest point (velocities already carry this step's gravity), and the part of it this
++	// step's gravity made against a support that does not move: a first touch is not an impact on that alone
++	Vec3 v1 = b.mRead1 != nullptr? b.mRead1->GetPointVelocityCOM(rd1) : Vec3::sZero();
++	Vec3 v2 = b.mRead2 != nullptr? b.mRead2->GetPointVelocityCOM(rd2) : Vec3::sZero();
++	float normal_velocity = (v2 - v1).Dot(n);
++	float approach = -normal_velocity;
++	Vec3 relative_gravity = Vec3::sZero();
++	if (b.mWrite2 != nullptr)
++		relative_gravity += inGravity * b.mWrite2->GetGravityFactor();
++	if (b.mWrite1 != nullptr)
++		relative_gravity -= inGravity * b.mWrite1->GetGravityFactor();
++	float gravity_closing = max(0.0f, -relative_gravity.Dot(n) * inDeltaTime);
++
++	// The core guard: a rigid speculative row at the deepest point against the backing
++	sSoftRowLinear(p.mCore, n, rd1, rd2, inInvM1, inInvI1, inInvM2, inInvI2);
++	sSoftRowRigid(p.mCore, max(0.0f, inPatch.mCoreGap / inDeltaTime));
++
++	// First touch, the episode rule (SOFT-CONTACT brief 5.5): a patch that will not touch this step carries no
++	// rows but the core guard; the first step of the episode that touches decides once whether the step can
++	// resolve it; for the rest of the episode the compliant rows act on the predicted overlap.
++	float d0 = inPatch.mSquash;
++	bool touches = d0 > 0.0f || d0 + approach * inDeltaTime > 0.0f;
++	if (!touches)
++		return; // the tail's contact set and the episode carry on unchanged
++
++	sSoftRowLinear(p.mNormal, n, r1, r2, inInvM1, inInvI1, inInvM2, inInvI2);
++	if ((ioTail.mFlags & SoftContactTail::OnsetPending) != 0)
++	{
++		p.mDecided = true;
++		ioTail.mFlags &= ~uint32(SoftContactTail::OnsetPending);
++
++		// The stiffness at the predicted peak squash: the closing energy put into the law from first touch
++		float w = p.mNormal.mInvEffectiveMass;
++		float stiffness_peak = inPatch.mNormalStiffness;
++		float c_law = inPatch.mLawCoefficient;
++		float n_law = max(inPatch.mLawExponent, 1.0f);
++		if (approach > 0.0f && w > 0.0f && c_law > 0.0f)
++		{
++			float energy = 0.5f * approach * approach / w;
++			float s_peak = std::pow((n_law + 1.0f) * energy / c_law, 1.0f / (n_law + 1.0f));
++			stiffness_peak = n_law * c_law * std::pow(s_peak, n_law - 1.0f);
++		}
++		float a = Square(inDeltaTime) * stiffness_peak * w;
++		if (a > 0.5f && approach - gravity_closing > mPhysicsSettings.mMinVelocityForRestitution)
++		{
++			p.mImpact = true;
++			++mSoftStats.mImpacts;
++			if (d0 > 0.0f)
++				++mSoftStats.mRestingImpacts;
++		}
++	}
++
++	if (p.mImpact)
++	{
++		// An impact the step cannot resolve: the rigid row with the material's restitution, at the deepest
++		// point, as the rigid contact sets it up; any overlap goes to the position pass
++		sSoftRowLinear(p.mNormal, n, rd1, rd2, inInvM1, inInvI1, inInvM2, inInvI2);
++		float speculative = max(0.0f, -d0 / inDeltaTime);
++		float bias = speculative;
++		if (inPatch.mRestitution > 0.0f && normal_velocity < -mPhysicsSettings.mMinVelocityForRestitution && normal_velocity < -speculative)
++		{
++			Vec3 relative_acceleration = relative_gravity;
++			if (b.mWrite1 != nullptr)
++				relative_acceleration -= b.mWrite1->GetAccumulatedForce() * b.mWrite1->GetInverseMass();
++			if (b.mWrite2 != nullptr)
++				relative_acceleration += b.mWrite2->GetAccumulatedForce() * b.mWrite2->GetInverseMass();
++			float force_delta_velocity = min(0.0f, relative_acceleration.Dot(n) * inDeltaTime);
++			bias = inPatch.mRestitution * (normal_velocity - force_delta_velocity);
++		}
++		sSoftRowRigid(p.mNormal, bias);
++	}
++	else
++		sSoftRowCompliant(p.mNormal, inPatch.mNormalStiffness, inPatch.mNormalDampingRatio, max(inPatch.mForce, 0.0f));
++
++	// The friction block: two tangents at the centre and the spin about the normal
++	if (p.mStaticFriction > 0.0f)
++	{
++		sSoftRowLinear(p.mFriction[0], t1, r1, r2, inInvM1, inInvI1, inInvM2, inInvI2);
++		sSoftRowLinear(p.mFriction[1], t2, r1, r2, inInvM1, inInvI1, inInvM2, inInvI2);
++		sSoftRowAngular(p.mFriction[2], n, inInvI1, inInvI2);
++		if (p.mImpact || p.mRigidStick)
++		{
++			for (SoftRow &r : p.mFriction)
++				sSoftRowRigid(r, 0.0f);
++		}
++		else
++		{
++			sSoftRowCompliant(p.mFriction[0], p.mShearStiffness, inPatch.mDampingRatio, -p.mShearStiffness * p.mShear[0]);
++			sSoftRowCompliant(p.mFriction[1], p.mShearStiffness, inPatch.mDampingRatio, -p.mShearStiffness * p.mShear[1]);
++			if (p.mSpinStiffness > 0.0f)
++				sSoftRowCompliant(p.mFriction[2], p.mSpinStiffness, inPatch.mDampingRatio, -p.mSpinStiffness * p.mSpin);
++			else
++				sSoftRowRigid(p.mFriction[2], 0.0f);
++		}
++	}
++
++	if (!p.mImpact)
++	{
++		// Tilt rows: compliant about in-plane axes through the centre, no preload (the explicit force already acts at
++		// the centre of the tilted field)
++		for (int i = 0; i < p.mNumTilt; ++i)
++		{
++			sSoftRowAngular(p.mTilt[i], inPatch.mTiltAxis[i], inInvI1, inInvI2);
++			sSoftRowCompliant(p.mTilt[i], inPatch.mTiltStiffness[i], inPatch.mDampingRatio, 0.0f);
++		}
++
++		// Rolling resistance rows: a saturating damper (rigid, within the arm times the normal impulse)
++		for (int i = 0; i < p.mNumRoll; ++i)
++		{
++			if (p.mRollArm[i] > 0.0f)
++			{
++				sSoftRowAngular(p.mRoll[i], inPatch.mRollAxis[i], inInvI1, inInvI2);
++				sSoftRowRigid(p.mRoll[i], 0.0f);
++			}
++		}
++	}
++
++	// The face grid's contact set, for the next step's first pass
++	for (int i = 0; i < 6; ++i)
++		ioTail.mActiveSet[i] = inPatch.mActiveSet[i];
++	ioTail.mGridLong = inPatch.mGridLong;
++	ioTail.mGridShort = inPatch.mGridShort;
++}
++
++bool ContactConstraintManager::FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
++{
++	if (mSoftPatches == nullptr)
++		return false;
++
++	bool any = false;
++	for (const uint32 *idx = inConstraintIdxBegin; idx < inConstraintIdxEnd; ++idx)
++		if (mConstraints[*idx].mSoftPatchIndex != cNoSoftPatch)
++		{
++			any = true;
++			break;
++		}
++	if (!any)
++		return false;
++
++	// The pair-sum bound (SOFT-CONTACT brief 5.4): S_b sums k w over the compliant rows of each dynamic body;
++	// static and kinematic bodies take 0, so the sums never depend on which neighbours share the island.
++	// Each row's a = h^2 max(k w, S_body1 + S_body2), with w the row's free-body inverse effective mass.
++	const Body *sum_body[cSoftMaxSumBodies];
++	float sum_value[cSoftMaxSumBodies];
++	int num_sums = 0;
++	auto sum_index = [&](const Body *inBody) -> int
++	{
++		if (!inBody->IsDynamic())
++			return -1;
++		for (int i = 0; i < num_sums; ++i)
++			if (sum_body[i] == inBody)
++				return i;
++		if (num_sums >= cSoftMaxSumBodies)
++			return -2;
++		sum_body[num_sums] = inBody;
++		sum_value[num_sums] = 0.0f;
++		return num_sums++;
++	};
++
++	for (const uint32 *idx = inConstraintIdxBegin; idx < inConstraintIdxEnd; ++idx)
++	{
++		const ContactConstraint &constraint = mConstraints[*idx];
++		if (constraint.mSoftPatchIndex == cNoSoftPatch)
++			continue;
++		SoftPatchConstraint &p = mSoftPatches[constraint.mSoftPatchIndex];
++		int i1 = sum_index(constraint.mBody1);
++		int i2 = sum_index(constraint.mBody2);
++		SoftRow *rows[6] = { &p.mNormal, &p.mTilt[0], &p.mTilt[1], &p.mFriction[0], &p.mFriction[1], &p.mFriction[2] };
++		for (SoftRow *r : rows)
++			if (r->mMode == SoftRowCompliant)
++			{
++				float kw = r->mStiffness * r->mInvEffectiveMass;
++				if (i1 >= 0)
++					sum_value[i1] += kw;
++				if (i2 >= 0)
++					sum_value[i2] += kw;
++			}
++	}
++
++	for (const uint32 *idx = inConstraintIdxBegin; idx < inConstraintIdxEnd; ++idx)
++	{
++		const ContactConstraint &constraint = mConstraints[*idx];
++		if (constraint.mSoftPatchIndex == cNoSoftPatch)
++			continue;
++		SoftPatchConstraint &p = mSoftPatches[constraint.mSoftPatchIndex];
++		int i1 = sum_index(constraint.mBody1);
++		int i2 = sum_index(constraint.mBody2);
++		float pair_sum = (i1 >= 0? sum_value[i1] : 0.0f) + (i2 >= 0? sum_value[i2] : 0.0f);
++		float h = p.mDeltaTime;
++
++		SoftRow *rows[6] = { &p.mNormal, &p.mTilt[0], &p.mTilt[1], &p.mFriction[0], &p.mFriction[1], &p.mFriction[2] };
++		for (SoftRow *r : rows)
++		{
++			if (r->mMode != SoftRowCompliant)
++				continue;
++			float w = r->mInvEffectiveMass;
++			float k = r->mStiffness;
++			float a = Square(h) * max(k * w, pair_sum);
++			r->mTheta = a > 0.5f? 1.0f - 0.5f / a : 0.0f;
++
++			// Material damping on every compliant row, c = 2 zeta sqrt(k m) with m the row's free-body mass
++			float c = 2.0f * r->mDampingRatio * sqrt(k / w);
++			float velocity_coefficient = c + r->mTheta * k * h;
++			if (SpringPart::CalculateSpringPropertiesWithPreload(h, w, r->mPreload, velocity_coefficient, cSoftFixedEpsilon, r->mSoftness, r->mBias, r->mEffectiveMass))
++			{
++				// Across a gap the implicit share acts only on the predicted overlap: impulse B (d0 + h v_closing)
++				if (r == &p.mNormal && p.mGap)
++					r->mBias = -p.mSquash / h;
++			}
++			else
++			{
++				r->mMode = SoftRowFixed;
++				++mSoftStats.mFixedRows;
++			}
++			if (r->mTheta > 0.0f)
++				++mSoftStats.mDampedRows;
++		}
++
++		// A friction block with one fixed row is applied as fixed impulses throughout
++		bool fixed = p.mFriction[0].mMode == SoftRowFixed || p.mFriction[1].mMode == SoftRowFixed || p.mFriction[2].mMode == SoftRowFixed;
++		if (fixed)
++		{
++			p.mFrictionFixed = true;
++			for (SoftRow &r : p.mFriction)
++				if (r.mMode != SoftRowInactive)
++					r.mMode = SoftRowFixed;
++		}
++
++		// The friction block's metric for the ellipse: J M^-1 J^T plus each row's softness
++		if (p.mFriction[0].mMode != SoftRowInactive)
++		{
++			SoftPatchBodies b = sSoftPatchBodies(*constraint.mBody1, constraint.mBody1->IsDynamic()? constraint.mInvMass1 : 0.0f, *constraint.mBody2, constraint.mBody2->IsDynamic()? constraint.mInvMass2 : 0.0f);
++			for (int i = 0; i < 3; ++i)
++				for (int j = 0; j < 3; ++j)
++					p.mFrictionMatrix[3 * i + j] = sSoftRowCoupling(p.mFriction[i], p.mFriction[j], b) + (i == j? double(p.mFriction[i].mSoftness) : 0.0);
++		}
++	}
++
++	return true;
++}
++
++void ContactConstraintManager::WarmStartSoftPatch(ContactConstraint &ioConstraint, float inWarmStartImpulseRatio)
++{
++	SoftPatchConstraint &p = mSoftPatches[ioConstraint.mSoftPatchIndex];
++	Body &body1 = *ioConstraint.mBody1;
++	Body &body2 = *ioConstraint.mBody2;
++	SoftPatchBodies b = sSoftPatchBodies(body1, body1.IsDynamic()? ioConstraint.mInvMass1 : 0.0f, body2, body2.IsDynamic()? ioConstraint.mInvMass2 : 0.0f);
++	const SoftContactTail &tail = *p.mTail;
++	float h = p.mDeltaTime;
++	float ratio = p.mWarm? inWarmStartImpulseRatio : 0.0f;
++
++	Quat rotation2 = body2.GetRotation();
++	Vec3 friction = rotation2 * Vec3::sLoadFloat3Unsafe(tail.mFrictionImpulse);
++	Vec3 moment = rotation2 * Vec3::sLoadFloat3Unsafe(tail.mMoment);
++
++	auto start = [&](SoftRow &ioRow, float inLast)
++	{
++		switch (ioRow.mMode)
++		{
++		case SoftRowCompliant:
++		case SoftRowRigid:
++			ioRow.mTotalLambda = inLast * ratio;
++			break;
++		case SoftRowFixed:
++			ioRow.mTotalLambda = h * ioRow.mPreload;
++			break;
++		default:
++			ioRow.mTotalLambda = 0.0f;
++			break;
++		}
++	};
++
++	// Start from last step's impulses (the lead's block_delta: the cluster correction follows)
++	start(p.mNormal, p.mImpact? 0.0f : tail.mNormalImpulse);
++	if (p.mNormal.mMode == SoftRowFixed)
++		p.mNormal.mTotalLambda = max(p.mNormal.mTotalLambda, 0.0f);
++	start(p.mCore, tail.mCoreImpulse);
++	start(p.mFriction[0], p.mImpact? 0.0f : friction.Dot(p.mTangent1));
++	start(p.mFriction[1], p.mImpact? 0.0f : friction.Dot(p.mTangent2));
++	start(p.mFriction[2], p.mImpact? 0.0f : moment.Dot(p.mNormalAxis));
++	for (int i = 0; i < 2; ++i)
++	{
++		start(p.mTilt[i], moment.Dot(p.mTilt[i].mAngular2));
++		start(p.mRoll[i], moment.Dot(p.mRoll[i].mAngular2));
++	}
++
++	// A fixed friction block keeps within the soft-finger ellipse of the normal impulse it starts with
++	if (p.mFrictionFixed)
++	{
++		double l[3] = { p.mFriction[0].mTotalLambda, p.mFriction[1].mTotalLambda, p.mFriction[2].mTotalLambda };
++		double identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
++		sSoftFingerProject(identity, l, double(p.mStaticFriction) * double(max(p.mNormal.mTotalLambda, 0.0f)), p.mSpinRadius);
++		for (int i = 0; i < 3; ++i)
++			p.mFriction[i].mTotalLambda = float(l[i]);
++	}
++
++	sSoftRowApply(p.mNormal, b, p.mNormal.mTotalLambda);
++	sSoftRowApply(p.mCore, b, p.mCore.mTotalLambda);
++	for (SoftRow &r : p.mFriction)
++		sSoftRowApply(r, b, r.mTotalLambda);
++	for (SoftRow &r : p.mTilt)
++		sSoftRowApply(r, b, r.mTotalLambda);
++	for (SoftRow &r : p.mRoll)
++		sSoftRowApply(r, b, r.mTotalLambda);
++}
++
++void ContactConstraintManager::WarmStartSoftClusters(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
++{
++	if (mSoftPatches == nullptr || !mSoftBlockWarmStart)
++		return;
++
++	// The island's soft patches, in its (sorted) order
++	uint32 patch_constraint[cSoftMaxClusterPatches];
++	int num_patches = 0;
++	bool over = false;
++	for (const uint32 *idx = inConstraintIdxBegin; idx < inConstraintIdxEnd; ++idx)
++		if (mConstraints[*idx].mSoftPatchIndex != cNoSoftPatch)
++		{
++			if (num_patches < cSoftMaxClusterPatches)
++				patch_constraint[num_patches++] = *idx;
++			else
++				over = true;
++		}
++	if (num_patches == 0)
++		return;
++
++	// Clusters: patches linked through shared dynamic bodies (union find, the first patch the root)
++	int parent[cSoftMaxClusterPatches];
++	for (int i = 0; i < num_patches; ++i)
++		parent[i] = i;
++	auto find = [&](int inI)
++	{
++		while (parent[inI] != inI)
++			inI = parent[inI] = parent[parent[inI]];
++		return inI;
++	};
++	for (int i = 0; i < num_patches; ++i)
++	{
++		const ContactConstraint &ci = mConstraints[patch_constraint[i]];
++		for (int j = 0; j < i; ++j)
++		{
++			const ContactConstraint &cj = mConstraints[patch_constraint[j]];
++			bool shared = (ci.mBody1->IsDynamic() && (ci.mBody1 == cj.mBody1 || ci.mBody1 == cj.mBody2))
++				|| (ci.mBody2->IsDynamic() && (ci.mBody2 == cj.mBody1 || ci.mBody2 == cj.mBody2));
++			if (shared)
++			{
++				int ri = find(i), rj = find(j);
++				if (ri != rj)
++					parent[max(ri, rj)] = min(ri, rj);
++			}
++		}
++	}
++
++	// A row of the cluster's block: which patch, which row
++	struct BlockRow
++	{
++		int					mPatch;
++		SoftRow *			mRow;
++	};
++
++	auto solve_block = [&](const int *inPatches, int inNumPatches)
++	{
++		BlockRow rows[cSoftBlockRowCap];
++		int num_rows = 0;
++		for (int k = 0; k < inNumPatches; ++k)
++		{
++			SoftPatchConstraint &p = mSoftPatches[mConstraints[patch_constraint[inPatches[k]]].mSoftPatchIndex];
++			SoftRow *candidates[6] = { &p.mNormal, &p.mTilt[0], &p.mTilt[1], &p.mFriction[0], &p.mFriction[1], &p.mFriction[2] };
++			for (SoftRow *r : candidates)
++				if (r->mMode == SoftRowCompliant && num_rows < cSoftBlockRowCap)
++					rows[num_rows++] = { k, r };
++		}
++		if (num_rows == 0)
++			return;
++
++		// W = J M^-1 J^T of the free bodies plus the softness, r = J v + b + softness lambda
++		double W[cSoftBlockRowCap * cSoftBlockRowCap];
++		double rhs[cSoftBlockRowCap];
++		double delta[cSoftBlockRowCap];
++		SoftPatchBodies bodies[64];
++		const Body *body1[64], *body2[64];
++		for (int k = 0; k < inNumPatches && k < 64; ++k)
++		{
++			ContactConstraint &c = mConstraints[patch_constraint[inPatches[k]]];
++			bodies[k] = sSoftPatchBodies(*c.mBody1, c.mBody1->IsDynamic()? c.mInvMass1 : 0.0f, *c.mBody2, c.mBody2->IsDynamic()? c.mInvMass2 : 0.0f);
++			body1[k] = c.mBody1;
++			body2[k] = c.mBody2;
++		}
++		for (int i = 0; i < num_rows; ++i)
++		{
++			const SoftRow &ri = *rows[i].mRow;
++			const SoftPatchBodies &bi = bodies[rows[i].mPatch];
++			rhs[i] = -(double(sSoftRowVelocity(ri, bi)) + double(ri.mBias) + double(ri.mSoftness) * double(ri.mTotalLambda));
++			for (int j = 0; j < num_rows; ++j)
++			{
++				const SoftRow &rj = *rows[j].mRow;
++				const SoftPatchBodies &bj = bodies[rows[j].mPatch];
++				double w = 0.0;
++				for (int si = 0; si < 2; ++si)
++				{
++					const Body *bod_i = si == 0? body1[rows[i].mPatch] : body2[rows[i].mPatch];
++					if (!bod_i->IsDynamic())
++						continue;
++					for (int sj = 0; sj < 2; ++sj)
++					{
++						const Body *bod_j = sj == 0? body1[rows[j].mPatch] : body2[rows[j].mPatch];
++						if (bod_i != bod_j)
++							continue;
++						double sign = (si == 0? -1.0 : 1.0) * (sj == 0? -1.0 : 1.0);
++						Vec3 ang_i = si == 0? ri.mAngular1 : ri.mAngular2;
++						Vec3 inv_i_ang_j = sj == 0? rj.mInvIAngular1 : rj.mInvIAngular2;
++						float inv_mass_j = sj == 0? bj.mInvMass1 : bj.mInvMass2;
++						w += sign * (double(inv_mass_j) * double(ri.mLinear.Dot(rj.mLinear)) + double(ang_i.Dot(inv_i_ang_j)));
++					}
++				}
++				W[i * num_rows + j] = w + (i == j? double(ri.mSoftness) : 0.0);
++			}
++		}
++		if (!sSoftSolveDense(W, rhs, num_rows, delta))
++			return;
++
++		// Clamp: normals at zero, tilt within its arms, friction into the soft-finger ellipse
++		for (int k = 0; k < inNumPatches; ++k)
++		{
++			SoftPatchConstraint &p = mSoftPatches[mConstraints[patch_constraint[inPatches[k]]].mSoftPatchIndex];
++			int i_normal = -1, i_tilt[2] = { -1, -1 }, i_friction[3] = { -1, -1, -1 };
++			for (int i = 0; i < num_rows; ++i)
++				if (rows[i].mPatch == k)
++				{
++					if (rows[i].mRow == &p.mNormal)
++						i_normal = i;
++					for (int t = 0; t < 2; ++t)
++						if (rows[i].mRow == &p.mTilt[t])
++							i_tilt[t] = i;
++					for (int f = 0; f < 3; ++f)
++						if (rows[i].mRow == &p.mFriction[f])
++							i_friction[f] = i;
++				}
++			float normal = p.mNormal.mTotalLambda;
++			if (i_normal >= 0)
++			{
++				if (double(normal) + delta[i_normal] < 0.0)
++					delta[i_normal] = -double(normal);
++				normal = float(double(normal) + delta[i_normal]);
++			}
++			float L = max(normal, 0.0f);
++			for (int t = 0; t < 2; ++t)
++				if (i_tilt[t] >= 0)
++				{
++					double total = Clamp(double(p.mTilt[t].mTotalLambda) + delta[i_tilt[t]], -double(L) * p.mTiltArmNeg[t], double(L) * p.mTiltArmPos[t]);
++					delta[i_tilt[t]] = total - double(p.mTilt[t].mTotalLambda);
++				}
++			if (i_friction[0] >= 0 && i_friction[1] >= 0)
++			{
++				double l[3];
++				for (int f = 0; f < 3; ++f)
++					l[f] = double(p.mFriction[f].mTotalLambda) + (i_friction[f] >= 0? delta[i_friction[f]] : 0.0);
++				sSoftFingerProject(p.mFrictionMatrix, l, double(p.mStaticFriction) * double(L), p.mSpinRadius);
++				for (int f = 0; f < 3; ++f)
++					if (i_friction[f] >= 0)
++						delta[i_friction[f]] = l[f] - double(p.mFriction[f].mTotalLambda);
++			}
++		}
++
++		// Apply
++		for (int i = 0; i < num_rows; ++i)
++		{
++			SoftRow &r = *rows[i].mRow;
++			float d = float(delta[i]);
++			r.mTotalLambda += d;
++			sSoftRowApply(r, bodies[rows[i].mPatch], d);
++		}
++	};
++
++	for (int root = 0; root < num_patches; ++root)
++	{
++		if (find(root) != root)
++			continue;
++		int members[cSoftMaxClusterPatches];
++		int num_members = 0;
++		int num_rows = 0;
++		for (int i = root; i < num_patches; ++i)
++			if (find(i) == root)
++			{
++				members[num_members++] = i;
++				const SoftPatchConstraint &p = mSoftPatches[mConstraints[patch_constraint[i]].mSoftPatchIndex];
++				const SoftRow *candidates[6] = { &p.mNormal, &p.mTilt[0], &p.mTilt[1], &p.mFriction[0], &p.mFriction[1], &p.mFriction[2] };
++				for (const SoftRow *r : candidates)
++					if (r->mMode == SoftRowCompliant)
++						++num_rows;
++			}
++		if (num_rows <= cSoftBlockRowCap && num_members <= 64)
++			solve_block(members, num_members);
++		else
++		{
++			++mSoftStats.mClusterOverCap;
++			for (int m = 0; m < num_members; ++m)
++				solve_block(&members[m], 1);
++		}
++	}
++	if (over)
++		++mSoftStats.mClusterOverCap;
++}
++
++bool ContactConstraintManager::SolveSoftPatch(ContactConstraint &ioConstraint)
++{
++	SoftPatchConstraint &p = mSoftPatches[ioConstraint.mSoftPatchIndex];
++	Body &body1 = *ioConstraint.mBody1;
++	Body &body2 = *ioConstraint.mBody2;
++	SoftPatchBodies b = sSoftPatchBodies(body1, body1.IsDynamic()? ioConstraint.mInvMass1 : 0.0f, body2, body2.IsDynamic()? ioConstraint.mInvMass2 : 0.0f);
++	bool any = false;
++
++	// The normal impulse limits friction, tilt and rolling resistance; it is solved last, as the rigid contact
++	// solves its normals last, so these take the previous sweep's
++	float L = max(p.mNormal.mTotalLambda, 0.0f);
++
++	// The friction block, limited together by the soft-finger ellipse
++	if (p.mFriction[0].mMode != SoftRowInactive && !p.mFrictionFixed)
++	{
++		double r[3], lambda[3], x[3];
++		for (int i = 0; i < 3; ++i)
++		{
++			const SoftRow &row = p.mFriction[i];
++			r[i] = -(double(sSoftRowVelocity(row, b)) + double(row.mBias) + double(row.mSoftness) * double(row.mTotalLambda));
++			lambda[i] = row.mTotalLambda;
++		}
++		double K[9];
++		for (int i = 0; i < 9; ++i)
++			K[i] = p.mFrictionMatrix[i];
++		if (sSoftSolveDense(K, r, 3, x))
++		{
++			double l[3] = { lambda[0] + x[0], lambda[1] + x[1], lambda[2] + x[2] };
++			bool slides = false;
++			double q_static = 0.0;
++			{
++				double mu_l = double(p.mStaticFriction) * double(L);
++				double rs = max(double(p.mSpinRadius), cSoftMinSpinRadius);
++				if (mu_l > 0.0)
++					q_static = (l[0] * l[0] + l[1] * l[1]) / (mu_l * mu_l) + (l[2] * l[2]) / ((mu_l * rs) * (mu_l * rs));
++				else
++					q_static = (l[0] != 0.0 || l[1] != 0.0 || l[2] != 0.0)? 2.0 : 0.0;
++			}
++			if (q_static > 1.0)
++			{
++				// Sliding: the kinetic coefficient's ellipse
++				sSoftFingerProject(p.mFrictionMatrix, l, double(p.mSlidingFriction) * double(L), p.mSpinRadius);
++				slides = true;
++			}
++			p.mSliding = slides;
++			for (int i = 0; i < 3; ++i)
++			{
++				float d = float(l[i] - lambda[i]);
++				if (d != 0.0f)
++				{
++					p.mFriction[i].mTotalLambda += d;
++					sSoftRowApply(p.mFriction[i], b, d);
++					any = true;
++				}
++			}
++		}
++	}
++
++	// Rolling resistance: a saturating damper
++	for (int i = 0; i < p.mNumRoll; ++i)
++		if (p.mRoll[i].mMode == SoftRowRigid)
++			any |= sSoftRowSolve(p.mRoll[i], b, -L * p.mRollArm[i], L * p.mRollArm[i]) != 0.0f;
++
++	// Tilt: the moment about each axis within the normal impulse times the distance to the patch edge on that side
++	for (int i = 0; i < p.mNumTilt; ++i)
++		if (p.mTilt[i].mMode == SoftRowCompliant)
++			any |= sSoftRowSolve(p.mTilt[i], b, -L * p.mTiltArmNeg[i], L * p.mTiltArmPos[i]) != 0.0f;
++
++	// The normal row and the core guard: a contact never pulls
++	if (p.mNormal.mMode == SoftRowCompliant || p.mNormal.mMode == SoftRowRigid)
++		any |= sSoftRowSolve(p.mNormal, b, 0.0f, FLT_MAX) != 0.0f;
++	if (p.mCore.mMode == SoftRowRigid)
++		any |= sSoftRowSolve(p.mCore, b, 0.0f, FLT_MAX) != 0.0f;
++
++	return any;
++}
++
++void ContactConstraintManager::StoreSoftPatch(const ContactConstraint &inConstraint) const
++{
++	SoftPatchConstraint &p = mSoftPatches[inConstraint.mSoftPatchIndex];
++	Body &body1 = *inConstraint.mBody1;
++	Body &body2 = *inConstraint.mBody2;
++	SoftPatchBodies b = sSoftPatchBodies(body1, body1.IsDynamic()? inConstraint.mInvMass1 : 0.0f, body2, body2.IsDynamic()? inConstraint.mInvMass2 : 0.0f);
++	SoftContactTail &tail = *p.mTail;
++	float h = p.mDeltaTime;
++	Vec3 n = p.mNormalAxis;
++
++	float lambda_normal = max(p.mNormal.mTotalLambda, 0.0f);
++	float lambda_core = max(p.mCore.mTotalLambda, 0.0f);
++	Vec3 friction = p.mFriction[0].mTotalLambda * p.mTangent1 + p.mFriction[1].mTotalLambda * p.mTangent2;
++	Vec3 moment = p.mFriction[2].mTotalLambda * n;
++	for (int i = 0; i < 2; ++i)
++		moment += p.mTilt[i].mTotalLambda * p.mTilt[i].mAngular2 + p.mRoll[i].mTotalLambda * p.mRoll[i].mAngular2;
++
++	// The tail, in body 2's frame. An impact's impulses do not warm start the spring that follows it.
++	Quat to_body2 = body2.GetRotation().Conjugated();
++	tail.mNormalImpulse = p.mImpact? 0.0f : lambda_normal;
++	tail.mCoreImpulse = lambda_core;
++	(to_body2 * (p.mImpact? Vec3::sZero() : friction)).StoreFloat3(&tail.mFrictionImpulse);
++	(to_body2 * (p.mImpact? Vec3::sZero() : moment)).StoreFloat3(&tail.mMoment);
++
++	// The pre-slip deflection: carried with the relative motion while sticking, set to the deflection that carries
++	// the applied friction while sliding, and relaxed by rolling over the relaxation length
++	Vec3 r1 = Vec3(p.mCentre - body1.GetCenterOfMassPosition());
++	Vec3 r2 = Vec3(p.mCentre - body2.GetCenterOfMassPosition());
++	Vec3 v1 = b.mRead1 != nullptr? b.mRead1->GetPointVelocityCOM(r1) : Vec3::sZero();
++	Vec3 v2 = b.mRead2 != nullptr? b.mRead2->GetPointVelocityCOM(r2) : Vec3::sZero();
++	Vec3 w1 = b.mRead1 != nullptr? b.mRead1->GetAngularVelocity() : Vec3::sZero();
++	Vec3 w2 = b.mRead2 != nullptr? b.mRead2->GetAngularVelocity() : Vec3::sZero();
++	Vec3 v_rel = v2 - v1;
++	Vec3 w_rel = w2 - w1;
++	float shear1 = 0.0f, shear2 = 0.0f, spin = 0.0f;
++	if (!p.mRigidStick && !p.mImpact && p.mFriction[0].mMode != SoftRowInactive)
++	{
++		if (p.mSliding && p.mShearStiffness > 0.0f)
++		{
++			shear1 = -p.mFriction[0].mTotalLambda / (h * p.mShearStiffness);
++			shear2 = -p.mFriction[1].mTotalLambda / (h * p.mShearStiffness);
++			spin = p.mSpinStiffness > 0.0f? -p.mFriction[2].mTotalLambda / (h * p.mSpinStiffness) : 0.0f;
++		}
++		else
++		{
++			shear1 = p.mShear[0] + h * v_rel.Dot(p.mTangent1);
++			shear2 = p.mShear[1] + h * v_rel.Dot(p.mTangent2);
++			spin = p.mSpin + h * w_rel.Dot(n);
++		}
++		if (p.mRelaxationLength > 0.0f)
++		{
++			float rolling_speed = (w_rel - w_rel.Dot(n) * n).Length() * p.mRollingRadius;
++			float relax = std::exp(-rolling_speed * h / p.mRelaxationLength);
++			shear1 *= relax;
++			shear2 *= relax;
++			spin *= relax;
++		}
++		else if (p.mRollingRadius > 0.0f)
++			shear1 = shear2 = spin = 0.0f;
++	}
++	(to_body2 * (shear1 * p.mTangent1 + shear2 * p.mTangent2)).StoreFloat3(&tail.mShear);
++	tail.mSpinDeflection = spin;
++
++	// The overlap the solve leaves for the end of the step, at the normal row
++	tail.mEndSquash = p.mSquash - h * sSoftRowVelocity(p.mNormal.mMode != SoftRowInactive? p.mNormal : p.mCore, b);
++	tail.mFlags |= SoftContactTail::Solved;
++
++	// The solved-contact report, built from the rows
++	if (inConstraint.mReportSolved && mContactListener != nullptr)
++	{
++		RVec3 deep = body1.GetCenterOfMassTransform() * Vec3::sLoadFloat3Unsafe(p.mDeepLocal1);
++		deep = 0.5_r * (deep + body2.GetCenterOfMassTransform() * Vec3::sLoadFloat3Unsafe(p.mDeepLocal2));
++		RVec3 normal_point = p.mImpact? deep : p.mCentre;
++		float pressing = lambda_normal + lambda_core;
++		RVec3 centre = pressing > 0.0f? (Real(lambda_normal) * normal_point + Real(lambda_core) * deep) / Real(pressing) : p.mCentre;
++
++		ContactSolvedReport report;
++		report.mWorldNormal = n;
++		report.mCentre = centre;
++		report.mLinearImpulse = pressing * n + friction;
++		report.mAngularImpulse = moment
++			+ Vec3(normal_point - centre).Cross(lambda_normal * n)
++			+ Vec3(deep - centre).Cross(lambda_core * n)
++			+ Vec3(p.mCentre - centre).Cross(friction);
++		report.mNormalImpulse = pressing;
++		report.mArea = p.mArea;
++		if (p.mSliding)
++			report.mFrictionUse = 1.0f;
++		else
++		{
++			float mu_n = p.mStaticFriction * lambda_normal;
++			float use = 0.0f;
++			if (mu_n > 0.0f)
++			{
++				use = Square(friction.Length() / mu_n);
++				float rs = p.mSpinRadius;
++				if (rs > 0.0f)
++					use += Square(p.mFriction[2].mTotalLambda / (mu_n * rs));
++				else if (p.mFriction[2].mTotalLambda != 0.0f)
++					use = 1.0f;
++				use = min(sqrt(use), 1.0f);
++			}
++			report.mFrictionUse = use;
++		}
++
++		SubShapeIDPair pair(body1.GetID(), inConstraint.mSubShapeID1, body2.GetID(), inConstraint.mSubShapeID2);
++		mContactListener->OnContactSolved(body1, body2, pair, report);
++	}
++}
++
++bool ContactConstraintManager::SolveSoftPatchPosition(ContactConstraint &ioConstraint)
++{
++	SoftPatchConstraint &p = mSoftPatches[ioConstraint.mSoftPatchIndex];
++	Body &body1 = *ioConstraint.mBody1;
++	Body &body2 = *ioConstraint.mBody2;
++	Vec3 n = p.mNormalAxis;
++
++	// The deepest point on each surface where the bodies are now
++	RVec3 p1 = body1.GetCenterOfMassTransform() * Vec3::sLoadFloat3Unsafe(p.mDeepLocal1);
++	RVec3 p2 = body2.GetCenterOfMassTransform() * Vec3::sLoadFloat3Unsafe(p.mDeepLocal2);
++	float surface_separation = Vec3(p2 - p1).Dot(n);
++
++	// An impact's overlap goes to the position pass like a rigid penetration; otherwise only an approach past
++	// the core (the layer squashed through) is corrected
++	float separation = p.mImpact? surface_separation : surface_separation + p.mLayer;
++	separation = max(separation + mPhysicsSettings.mPenetrationSlop, -mPhysicsSettings.mMaxPenetrationDistance);
++	if (separation >= 0.0f)
++		return false;
++
++	RVec3 mid = 0.5_r * (p1 + p2);
++	Vec3 r1 = Vec3(mid - body1.GetCenterOfMassPosition());
++	Vec3 r2 = Vec3(mid - body2.GetCenterOfMassPosition());
++	p.mPositionPart.CalculateConstraintPropertiesWithMassOverride(body1, ioConstraint.mInvMass1, ioConstraint.mInvInertiaScale1, r1, body2, ioConstraint.mInvMass2, ioConstraint.mInvInertiaScale2, r2, n);
++	return p.mPositionPart.SolvePositionConstraintWithMassOverride(body1, ioConstraint.mInvMass1, body2, ioConstraint.mInvMass2, n, separation, mPhysicsSettings.mBaumgarte);
++}
++
+ JPH_NAMESPACE_END
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.h b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.h
+index cbdc1b5700..45157b3d68 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.h
+@@ -253,6 +253,33 @@ public:
+ 	/// Restoring state for replay. Returns false when failed.
+ 	bool						RestoreState(StateRecorder &inStream, const StateRecorderFilter *inFilter);
+ 
++	// CRUMB: the compliant contact (soft patches). InitSoftContacts sets how many soft patches one step can
++	// solve: 0, the default, keeps every contact rigid as before; a manifold beyond the limit stays rigid and
++	// is counted. inBlockWarmStart false leaves the soft rows to last step's warm start alone (a test switch).
++	void						InitSoftContacts(uint inMaxPatches, bool inBlockWarmStart = true)		{ mMaxSoftPatches = inMaxPatches; mSoftBlockWarmStart = inBlockWarmStart; }
++	uint						GetMaxSoftContactPatches() const									{ return mMaxSoftPatches; }
++
++	// CRUMB: the last step's soft-contact counts, for the status line and the probes
++	struct SoftContactStats
++	{
++		uint32					mPatches = 0;						// manifolds solved as soft patches
++		uint32					mDampedRows = 0;					// compliant rows the step resolves (theta above 0: numerically damped)
++		uint32					mImpacts = 0;						// first touches solved as an impact
++		uint32					mRestingImpacts = 0;				// of those, on an overlap that was already there
++		uint32					mOverflow = 0;						// patches refused for want of room (they stayed rigid)
++		uint32					mFixedRows = 0;						// rows applied as fixed impulses (no damping and no implicit share)
++		uint32					mClusterOverCap = 0;				// soft clusters warm started patch by patch (over the row cap)
++	};
++	SoftContactStats			GetSoftContactStats() const											{ return mSoftStats; }
++
++	// CRUMB: per island, before its warm start: every soft patch's implicit share from the pair-sum bound
++	// and its softness. Returns true when the island holds a soft patch (it is then never split).
++	bool						FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
++
++	// CRUMB: per island, after its warm start: the compliant rows of each soft cluster (patches linked through
++	// dynamic bodies) corrected together on what the warm start left over, then clamped.
++	void						WarmStartSoftClusters(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
++
+ private:
+ 	/// Local space contact point, used for caching impulses
+ 	class CachedContactPoint
+@@ -282,6 +309,14 @@ private:
+ 		/// Calculate size in bytes needed beyond the size of the class to store inNumContactPoints
+ 		static int				sGetRequiredExtraSize(int inNumContactPoints)						{ return max(0, inNumContactPoints - 1) * sizeof(CachedContactPoint); }
+ 
++		// CRUMB: the extra size with a soft-contact tail after the points
++		static int				sGetRequiredExtraSize(int inNumContactPoints, bool inSoftTail)		{ return sGetRequiredExtraSize(inNumContactPoints) + (inSoftTail? int(sizeof(SoftContactTail)) : 0); }
++
++		// CRUMB: the soft-contact tail, right after the points (only with the SoftTail flag)
++		SoftContactTail *		GetSoftTail()														{ return reinterpret_cast<SoftContactTail *>(reinterpret_cast<uint8 *>(this) + sGetRequiredTotalSize(mNumContactPoints)); }
++		const SoftContactTail *	GetSoftTail() const													{ return reinterpret_cast<const SoftContactTail *>(reinterpret_cast<const uint8 *>(this) + sGetRequiredTotalSize(mNumContactPoints)); }
++		bool					HasSoftTail() const													{ return (mFlags.load(memory_order_relaxed) & uint16(EFlags::SoftTail)) != 0; }
++
+ 		/// Calculate total class size needed for storing inNumContactPoints
+ 		static int				sGetRequiredTotalSize(int inNumContactPoints)						{ return sizeof(CachedManifold) + sGetRequiredExtraSize(inNumContactPoints); }
+ 
+@@ -300,7 +335,8 @@ private:
+ 		enum class EFlags : uint16
+ 		{
+ 			ContactPersisted	= 1,																///< If this cache entry was reused in the next simulation update
+-			CCDContact			= 2																	///< This is a cached manifold reported by continuous collision detection and was only used to create a contact callback
++			CCDContact			= 2,																///< This is a cached manifold reported by continuous collision detection and was only used to create a contact callback
++			SoftTail			= 4																	// CRUMB: a SoftContactTail follows the contact points
+ 		};
+ 
+ 		/// @see EFlags
+@@ -367,7 +403,7 @@ private:
+ 
+ 		/// Find / create cached entry for SubShapeIDPair -> CachedManifold
+ 		const MKeyValue *		Find(const SubShapeIDPair &inKey, uint64 inKeyHash) const;
+-		MKeyValue *				Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
++		MKeyValue *				Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints, bool inSoftTail = false);
+ 		MKVAndCreated			FindOrCreate(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
+ 		uint32					ToHandle(const MKeyValue *inKeyValue) const;
+ 		const MKeyValue *		FromHandle(uint32 inHandle) const;
+@@ -472,13 +508,102 @@ private:
+ 		SubShapeID				mSubShapeID1;						// CRUMB: the manifold's sub-shapes, for OnContactSolved
+ 		SubShapeID				mSubShapeID2;
+ 		bool					mReportSolved = false;				// CRUMB: ContactSettings::mReportSolved
++		uint32					mSoftPatchIndex = ~uint32(0);		// CRUMB: this manifold's soft patch in mSoftPatches, or none (rigid)
+ 		WorldContactPoints		mContactPoints;
+ 	};
+ 
+ 	// CRUMB: build one manifold's ContactSolvedReport from its total impulses and give it to the listener
+ 	void						ReportSolvedContact(const ContactConstraint &inConstraint) const;
+ 
++	// CRUMB: one row of a soft patch: an impulse along mLinear at a point (a linear row), or a moment about
++	// mAngular2 (an angular row: mLinear zero, mAngular1 = mAngular2). J = [-lin, -ang1, lin, ang2], so J v is
++	// the opening rate and a positive impulse pushes body 2 along the row.
++	struct SoftRow
++	{
++		Vec3					mLinear;
++		Vec3					mAngular1;
++		Vec3					mAngular2;
++		Vec3					mInvIAngular1;						// I1^-1 ang1, with the contact's inverse inertia scale
++		Vec3					mInvIAngular2;
++		float					mInvEffectiveMass;					// J M^-1 J^T of the free bodies
++		float					mEffectiveMass;						// 1 / (inverse effective mass + softness)
++		float					mSoftness;
++		float					mBias;
++		float					mTotalLambda;
++		float					mStiffness;							// k of a compliant row
++		float					mDampingRatio;						// zeta of a compliant row
++		float					mPreload;							// the law's explicit force F
++		float					mTheta;								// the implicit share's ramp
++		uint8					mMode;								// ESoftRowMode
++	};
++
++	// CRUMB: a soft patch's rows and state for one step, in a side table from the temp allocator
++	struct SoftPatchConstraint
++	{
++		SoftRow					mNormal;
++		SoftRow					mCore;
++		SoftRow					mFriction[3];						// tangent 1, tangent 2, spin about the normal
++		SoftRow					mTilt[2];
++		SoftRow					mRoll[2];
++		AxisConstraintPart		mPositionPart;						// the core guard's (and an impact's) position correction
++		RVec3					mCentre;
++		Vec3					mNormalAxis;
++		Vec3					mTangent1;
++		Vec3					mTangent2;
++		Float3					mDeepLocal1;						// the deepest point on each surface, in each body's centre-of-mass frame
++		Float3					mDeepLocal2;
++		double					mFrictionMatrix[9];					// the friction block's J M^-1 J^T plus softness, for the ellipse
++		SoftContactTail *		mTail;								// this step's tail in the write cache
++		float					mDeltaTime;
++		float					mSquash;
++		float					mLayer;								// the layer's whole depth at mDeepest (where the cores meet)
++		float					mTiltArmNeg[2];
++		float					mTiltArmPos[2];
++		float					mRollArm[2];
++		float					mSpinRadius;
++		float					mStaticFriction;
++		float					mSlidingFriction;
++		float					mShearStiffness;
++		float					mSpinStiffness;
++		float					mRelaxationLength;
++		float					mRollingRadius;
++		float					mArea;
++		float					mShear[2];							// the carried pre-slip deflection on this step's tangents
++		float					mSpin;								// and about the normal
++		uint8					mClass;
++		uint8					mNumTilt;
++		uint8					mNumRoll;
++		bool					mImpact;							// this step's first touch is solved as an impact
++		bool					mDecided;							// the first touch was decided this step (OnsetPending clears)
++		bool					mGap;								// nothing presses at the start of the step
++		bool					mRigidStick;
++		bool					mFrictionFixed;						// the friction rows were applied as fixed impulses
++		bool					mSliding;							// the friction block was projected onto the ellipse
++		bool					mWarm;								// last step solved this patch: its tail's impulses warm start the rows
++	};
++
++	// CRUMB: set up a manifold's soft patch (TemplatedAddContactConstraint)
++	void						SetupSoftPatch(ContactConstraint &ioConstraint, SoftPatchConstraint &outPatch, const SoftContactPatch &inPatch, SoftContactTail &ioTail, bool inWarm, float inInvM1, Mat44Arg inInvI1, float inInvM2, Mat44Arg inInvI2, float inDeltaTime, Vec3Arg inGravity);
++
++	// CRUMB: a soft patch's warm start, sweep, stored impulses and report, and position pass
++	void						WarmStartSoftPatch(ContactConstraint &ioConstraint, float inWarmStartImpulseRatio);
++	bool						SolveSoftPatch(ContactConstraint &ioConstraint);
++	void						StoreSoftPatch(const ContactConstraint &inConstraint) const;
++	bool						SolveSoftPatchPosition(ContactConstraint &ioConstraint);
++
+ public:
++	// CRUMB: a contact constraint without a soft patch
++	static constexpr uint32		cNoSoftPatch = ~uint32(0);
++
++	// CRUMB: how a soft patch's row is solved this step
++	enum ESoftRowMode : uint8
++	{
++		SoftRowInactive			= 0,
++		SoftRowCompliant		= 1,								// explicit preload plus an implicit share (softness)
++		SoftRowFixed			= 2,								// the explicit impulse h F applied once at warm start, with its clamp
++		SoftRowRigid			= 3,								// a velocity row with a bias (core guard, impact, rolling resistance, rigid stick)
++	};
++
+ 	/// The maximum value that can be passed to Init for inMaxContactConstraints. Note you should really use a lower value, using this value will cost a lot of memory!
+ 	static constexpr uint		cMaxContactConstraintsLimit = ~uint(0) / sizeof(ContactConstraint);
+ 
+@@ -522,6 +647,13 @@ private:
+ 
+ 	/// Context used for this physics update
+ 	PhysicsUpdateContext *		mUpdateContext;
++
++	// CRUMB: this step's soft patches (see InitSoftContacts)
++	SoftPatchConstraint *		mSoftPatches = nullptr;
++	uint32						mMaxSoftPatches = 0;
++	bool						mSoftBlockWarmStart = true;
++	atomic<uint32>				mNumSoftPatches { 0 };
++	mutable SoftContactStats	mSoftStats;
+ };
+ 
+ JPH_NAMESPACE_END
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
+index 59e030325c..7753df4a4b 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
++++ b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
+@@ -1424,9 +1424,14 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
+ 				mContactManager.SortContacts(contacts_begin, contacts_end);
+ 			}
+ 
++			// CRUMB: the island's soft patches take their implicit share and softness from this step's patches
++			// before anything is warm started; an island with soft patches is solved whole, never split
++			bool has_soft_patches = has_contacts && mContactManager.FinalizeSoftPatches(contacts_begin, contacts_end);
++
+ 			// Split up large islands
+ 			CalculateSolverSteps steps_calculator(mPhysicsSettings);
+ 			if (mPhysicsSettings.mUseLargeIslandSplitter
++				&& !has_soft_patches
+ 				&& mLargeIslandSplitter.SplitIsland(island_idx, mIslandBuilder, mBodyManager, mContactManager, active_constraints, steps_calculator))
+ 				continue; // Loop again to try to fetch the newly split island
+ 
+@@ -1435,6 +1440,10 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
+ 			mContactManager.WarmStartVelocityConstraints(contacts_begin, contacts_end, warm_start_impulse_ratio, steps_calculator);
+ 			steps_calculator.Finalize();
+ 
++			// CRUMB: then each soft cluster's compliant rows are corrected together on what the warm start left
++			if (has_soft_patches)
++				mContactManager.WarmStartSoftClusters(contacts_begin, contacts_end);
++
+ 			// Store the number of position steps for later
+ 			mIslandBuilder.SetNumPositionSteps(island_idx, steps_calculator.GetNumPositionSteps());
+ 
+@@ -1752,6 +1761,14 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
+ 
+ 				// Check if this is a possible earlier hit than the one before
+ 				float fraction = inResult.mFraction;
++
++				// CRUMB: a hit at fraction 0 between bodies of which one has compliant shapes is an overlap the
++				// narrow phase already holds a manifold for, and that manifold's soft patch owns it: a rigid hit here
++				// would replace the spring on every step the pair is squashed
++				if (fraction <= 0.0f
++					&& (mBodyManager.GetBody(mCCDBody.mBodyID1).HasCompliantShapes() || mBodyManager.GetBody(inResult.mBodyID2).HasCompliantShapes()))
++					return;
++
+ 				if (fraction < mCCDBody.mFractionPlusSlop)
+ 				{
+ 					// Normalize normal
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.h b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.h
+index 8ba7b1e1f3..1d96cd0e6d 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.h
+@@ -67,6 +67,11 @@ public:
+ 	void						SetContactListener(ContactListener *inListener)				{ mContactManager.SetContactListener(inListener); }
+ 	ContactListener *			GetContactListener() const									{ return mContactManager.GetContactListener(); }
+ 
++	// CRUMB: the compliant contact. InitSoftContacts sets how many soft patches a step can solve (0, the default,
++	// keeps every contact rigid); GetSoftContactStats gives the last step's counts.
++	void						InitSoftContacts(uint inMaxPatches, bool inBlockWarmStart = true) { mContactManager.InitSoftContacts(inMaxPatches, inBlockWarmStart); }
++	ContactConstraintManager::SoftContactStats GetSoftContactStats() const					{ return mContactManager.GetSoftContactStats(); }
++
+ 	/// Listener that is notified whenever a contact point between a soft body and another body
+ 	void						SetSoftBodyContactListener(SoftBodyContactListener *inListener) { mSoftBodyContactListener = inListener; }
+ 	SoftBodyContactListener *	GetSoftBodyContactListener() const							{ return mSoftBodyContactListener; }

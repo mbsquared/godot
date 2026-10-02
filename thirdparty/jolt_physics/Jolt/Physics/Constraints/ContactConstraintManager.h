@@ -253,6 +253,33 @@ public:
 	/// Restoring state for replay. Returns false when failed.
 	bool						RestoreState(StateRecorder &inStream, const StateRecorderFilter *inFilter);
 
+	// CRUMB: the compliant contact (soft patches). InitSoftContacts sets how many soft patches one step can
+	// solve: 0, the default, keeps every contact rigid as before; a manifold beyond the limit stays rigid and
+	// is counted. inBlockWarmStart false leaves the soft rows to last step's warm start alone (a test switch).
+	void						InitSoftContacts(uint inMaxPatches, bool inBlockWarmStart = true)		{ mMaxSoftPatches = inMaxPatches; mSoftBlockWarmStart = inBlockWarmStart; }
+	uint						GetMaxSoftContactPatches() const									{ return mMaxSoftPatches; }
+
+	// CRUMB: the last step's soft-contact counts, for the status line and the probes
+	struct SoftContactStats
+	{
+		uint32					mPatches = 0;						// manifolds solved as soft patches
+		uint32					mDampedRows = 0;					// compliant rows the step resolves (theta above 0: numerically damped)
+		uint32					mImpacts = 0;						// first touches solved as an impact
+		uint32					mRestingImpacts = 0;				// of those, on an overlap that was already there
+		uint32					mOverflow = 0;						// patches refused for want of room (they stayed rigid)
+		uint32					mFixedRows = 0;						// rows applied as fixed impulses (no damping and no implicit share)
+		uint32					mClusterOverCap = 0;				// soft clusters warm started patch by patch (over the row cap)
+	};
+	SoftContactStats			GetSoftContactStats() const											{ return mSoftStats; }
+
+	// CRUMB: per island, before its warm start: every soft patch's implicit share from the pair-sum bound
+	// and its softness. Returns true when the island holds a soft patch (it is then never split).
+	bool						FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
+
+	// CRUMB: per island, after its warm start: the compliant rows of each soft cluster (patches linked through
+	// dynamic bodies) corrected together on what the warm start left over, then clamped.
+	void						WarmStartSoftClusters(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
+
 private:
 	/// Local space contact point, used for caching impulses
 	class CachedContactPoint
@@ -282,6 +309,14 @@ private:
 		/// Calculate size in bytes needed beyond the size of the class to store inNumContactPoints
 		static int				sGetRequiredExtraSize(int inNumContactPoints)						{ return max(0, inNumContactPoints - 1) * sizeof(CachedContactPoint); }
 
+		// CRUMB: the extra size with a soft-contact tail after the points
+		static int				sGetRequiredExtraSize(int inNumContactPoints, bool inSoftTail)		{ return sGetRequiredExtraSize(inNumContactPoints) + (inSoftTail? int(sizeof(SoftContactTail)) : 0); }
+
+		// CRUMB: the soft-contact tail, right after the points (only with the SoftTail flag)
+		SoftContactTail *		GetSoftTail()														{ return reinterpret_cast<SoftContactTail *>(reinterpret_cast<uint8 *>(this) + sGetRequiredTotalSize(mNumContactPoints)); }
+		const SoftContactTail *	GetSoftTail() const													{ return reinterpret_cast<const SoftContactTail *>(reinterpret_cast<const uint8 *>(this) + sGetRequiredTotalSize(mNumContactPoints)); }
+		bool					HasSoftTail() const													{ return (mFlags.load(memory_order_relaxed) & uint16(EFlags::SoftTail)) != 0; }
+
 		/// Calculate total class size needed for storing inNumContactPoints
 		static int				sGetRequiredTotalSize(int inNumContactPoints)						{ return sizeof(CachedManifold) + sGetRequiredExtraSize(inNumContactPoints); }
 
@@ -300,7 +335,8 @@ private:
 		enum class EFlags : uint16
 		{
 			ContactPersisted	= 1,																///< If this cache entry was reused in the next simulation update
-			CCDContact			= 2																	///< This is a cached manifold reported by continuous collision detection and was only used to create a contact callback
+			CCDContact			= 2,																///< This is a cached manifold reported by continuous collision detection and was only used to create a contact callback
+			SoftTail			= 4																	// CRUMB: a SoftContactTail follows the contact points
 		};
 
 		/// @see EFlags
@@ -367,7 +403,7 @@ private:
 
 		/// Find / create cached entry for SubShapeIDPair -> CachedManifold
 		const MKeyValue *		Find(const SubShapeIDPair &inKey, uint64 inKeyHash) const;
-		MKeyValue *				Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
+		MKeyValue *				Create(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints, bool inSoftTail = false);
 		MKVAndCreated			FindOrCreate(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
 		uint32					ToHandle(const MKeyValue *inKeyValue) const;
 		const MKeyValue *		FromHandle(uint32 inHandle) const;
@@ -472,13 +508,102 @@ private:
 		SubShapeID				mSubShapeID1;						// CRUMB: the manifold's sub-shapes, for OnContactSolved
 		SubShapeID				mSubShapeID2;
 		bool					mReportSolved = false;				// CRUMB: ContactSettings::mReportSolved
+		uint32					mSoftPatchIndex = ~uint32(0);		// CRUMB: this manifold's soft patch in mSoftPatches, or none (rigid)
 		WorldContactPoints		mContactPoints;
 	};
 
 	// CRUMB: build one manifold's ContactSolvedReport from its total impulses and give it to the listener
 	void						ReportSolvedContact(const ContactConstraint &inConstraint) const;
 
+	// CRUMB: one row of a soft patch: an impulse along mLinear at a point (a linear row), or a moment about
+	// mAngular2 (an angular row: mLinear zero, mAngular1 = mAngular2). J = [-lin, -ang1, lin, ang2], so J v is
+	// the opening rate and a positive impulse pushes body 2 along the row.
+	struct SoftRow
+	{
+		Vec3					mLinear;
+		Vec3					mAngular1;
+		Vec3					mAngular2;
+		Vec3					mInvIAngular1;						// I1^-1 ang1, with the contact's inverse inertia scale
+		Vec3					mInvIAngular2;
+		float					mInvEffectiveMass;					// J M^-1 J^T of the free bodies
+		float					mEffectiveMass;						// 1 / (inverse effective mass + softness)
+		float					mSoftness;
+		float					mBias;
+		float					mTotalLambda;
+		float					mStiffness;							// k of a compliant row
+		float					mDampingRatio;						// zeta of a compliant row
+		float					mPreload;							// the law's explicit force F
+		float					mTheta;								// the implicit share's ramp
+		uint8					mMode;								// ESoftRowMode
+	};
+
+	// CRUMB: a soft patch's rows and state for one step, in a side table from the temp allocator
+	struct SoftPatchConstraint
+	{
+		SoftRow					mNormal;
+		SoftRow					mCore;
+		SoftRow					mFriction[3];						// tangent 1, tangent 2, spin about the normal
+		SoftRow					mTilt[2];
+		SoftRow					mRoll[2];
+		AxisConstraintPart		mPositionPart;						// the core guard's (and an impact's) position correction
+		RVec3					mCentre;
+		Vec3					mNormalAxis;
+		Vec3					mTangent1;
+		Vec3					mTangent2;
+		Float3					mDeepLocal1;						// the deepest point on each surface, in each body's centre-of-mass frame
+		Float3					mDeepLocal2;
+		double					mFrictionMatrix[9];					// the friction block's J M^-1 J^T plus softness, for the ellipse
+		SoftContactTail *		mTail;								// this step's tail in the write cache
+		float					mDeltaTime;
+		float					mSquash;
+		float					mLayer;								// the layer's whole depth at mDeepest (where the cores meet)
+		float					mTiltArmNeg[2];
+		float					mTiltArmPos[2];
+		float					mRollArm[2];
+		float					mSpinRadius;
+		float					mStaticFriction;
+		float					mSlidingFriction;
+		float					mShearStiffness;
+		float					mSpinStiffness;
+		float					mRelaxationLength;
+		float					mRollingRadius;
+		float					mArea;
+		float					mShear[2];							// the carried pre-slip deflection on this step's tangents
+		float					mSpin;								// and about the normal
+		uint8					mClass;
+		uint8					mNumTilt;
+		uint8					mNumRoll;
+		bool					mImpact;							// this step's first touch is solved as an impact
+		bool					mDecided;							// the first touch was decided this step (OnsetPending clears)
+		bool					mGap;								// nothing presses at the start of the step
+		bool					mRigidStick;
+		bool					mFrictionFixed;						// the friction rows were applied as fixed impulses
+		bool					mSliding;							// the friction block was projected onto the ellipse
+		bool					mWarm;								// last step solved this patch: its tail's impulses warm start the rows
+	};
+
+	// CRUMB: set up a manifold's soft patch (TemplatedAddContactConstraint)
+	void						SetupSoftPatch(ContactConstraint &ioConstraint, SoftPatchConstraint &outPatch, const SoftContactPatch &inPatch, SoftContactTail &ioTail, bool inWarm, float inInvM1, Mat44Arg inInvI1, float inInvM2, Mat44Arg inInvI2, float inDeltaTime, Vec3Arg inGravity);
+
+	// CRUMB: a soft patch's warm start, sweep, stored impulses and report, and position pass
+	void						WarmStartSoftPatch(ContactConstraint &ioConstraint, float inWarmStartImpulseRatio);
+	bool						SolveSoftPatch(ContactConstraint &ioConstraint);
+	void						StoreSoftPatch(const ContactConstraint &inConstraint) const;
+	bool						SolveSoftPatchPosition(ContactConstraint &ioConstraint);
+
 public:
+	// CRUMB: a contact constraint without a soft patch
+	static constexpr uint32		cNoSoftPatch = ~uint32(0);
+
+	// CRUMB: how a soft patch's row is solved this step
+	enum ESoftRowMode : uint8
+	{
+		SoftRowInactive			= 0,
+		SoftRowCompliant		= 1,								// explicit preload plus an implicit share (softness)
+		SoftRowFixed			= 2,								// the explicit impulse h F applied once at warm start, with its clamp
+		SoftRowRigid			= 3,								// a velocity row with a bias (core guard, impact, rolling resistance, rigid stick)
+	};
+
 	/// The maximum value that can be passed to Init for inMaxContactConstraints. Note you should really use a lower value, using this value will cost a lot of memory!
 	static constexpr uint		cMaxContactConstraintsLimit = ~uint(0) / sizeof(ContactConstraint);
 
@@ -522,6 +647,13 @@ private:
 
 	/// Context used for this physics update
 	PhysicsUpdateContext *		mUpdateContext;
+
+	// CRUMB: this step's soft patches (see InitSoftContacts)
+	SoftPatchConstraint *		mSoftPatches = nullptr;
+	uint32						mMaxSoftPatches = 0;
+	bool						mSoftBlockWarmStart = true;
+	atomic<uint32>				mNumSoftPatches { 0 };
+	mutable SoftContactStats	mSoftStats;
 };
 
 JPH_NAMESPACE_END

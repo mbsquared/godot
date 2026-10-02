@@ -1023,6 +1023,32 @@ bool BodyInterface::GetUseManifoldReduction(const BodyID &inBodyID) const
 		return true;
 }
 
+void BodyInterface::SetHasCompliantShapes(const BodyID &inBodyID, bool inHas)
+{
+	BodyLockWrite lock(*mBodyLockInterface, inBodyID);
+	if (lock.Succeeded())
+	{
+		Body &body = lock.GetBody();
+		if (body.IsRigidBody() && body.HasCompliantShapes() != inHas)
+		{
+			body.SetHasCompliantShapes(inHas);
+
+			// Flag collision cache invalid for this body
+			if (body.IsInBroadPhase())
+				mBodyManager->InvalidateContactCacheForBody(body);
+		}
+	}
+}
+
+bool BodyInterface::GetHasCompliantShapes(const BodyID &inBodyID) const
+{
+	BodyLockRead lock(*mBodyLockInterface, inBodyID);
+	if (lock.Succeeded())
+		return lock.GetBody().HasCompliantShapes();
+	else
+		return false;
+}
+
 void BodyInterface::SetIsSensor(const BodyID &inBodyID, bool inIsSensor)
 {
 	BodyLockWrite lock(*mBodyLockInterface, inBodyID);

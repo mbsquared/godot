@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "../spaces/jolt_soft_patch_3d.h"
+
 #include "core/math/transform_3d.h"
 
 #include "Jolt/Jolt.h"
@@ -73,6 +75,9 @@ class JoltShapeInstance3D {
 	float surface_bounce = 0.0f;
 	bool has_surface = false;
 
+	// CRUMB: this shape's soft surface (the compliant contact); KIND_NONE is a rigid shape, as before.
+	JoltSoftSurface3D soft_surface;
+
 public:
 	JoltShapeInstance3D() = default;
 	JoltShapeInstance3D(JoltShapedObject3D *p_parent, JoltShape3D *p_shape, const Transform3D &p_transform = Transform3D(), const Vector3 &p_scale = Vector3(1.0f, 1.0f, 1.0f), bool p_disabled = false);
@@ -113,6 +118,10 @@ public:
 		surface_bounce = 0.0f;
 		has_surface = false;
 	}
+
+	bool is_soft() const { return soft_surface.kind != JoltSoftSurface3D::KIND_NONE; }
+	const JoltSoftSurface3D &get_soft_surface() const { return soft_surface; }
+	void set_soft_surface(const JoltSoftSurface3D &p_surface) { soft_surface = p_surface; }
 
 	bool try_build();
 };

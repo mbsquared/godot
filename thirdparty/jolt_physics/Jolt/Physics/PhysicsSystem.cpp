@@ -1424,9 +1424,14 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				mContactManager.SortContacts(contacts_begin, contacts_end);
 			}
 
+			// CRUMB: the island's soft patches take their implicit share and softness from this step's patches
+			// before anything is warm started; an island with soft patches is solved whole, never split
+			bool has_soft_patches = has_contacts && mContactManager.FinalizeSoftPatches(contacts_begin, contacts_end);
+
 			// Split up large islands
 			CalculateSolverSteps steps_calculator(mPhysicsSettings);
 			if (mPhysicsSettings.mUseLargeIslandSplitter
+				&& !has_soft_patches
 				&& mLargeIslandSplitter.SplitIsland(island_idx, mIslandBuilder, mBodyManager, mContactManager, active_constraints, steps_calculator))
 				continue; // Loop again to try to fetch the newly split island
 
@@ -1434,6 +1439,10 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 			ConstraintManager::sWarmStartVelocityConstraints(active_constraints, constraints_begin, constraints_end, warm_start_impulse_ratio, steps_calculator);
 			mContactManager.WarmStartVelocityConstraints(contacts_begin, contacts_end, warm_start_impulse_ratio, steps_calculator);
 			steps_calculator.Finalize();
+
+			// CRUMB: then each soft cluster's compliant rows are corrected together on what the warm start left
+			if (has_soft_patches)
+				mContactManager.WarmStartSoftClusters(contacts_begin, contacts_end);
 
 			// Store the number of position steps for later
 			mIslandBuilder.SetNumPositionSteps(island_idx, steps_calculator.GetNumPositionSteps());
@@ -1752,6 +1761,14 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 
 				// Check if this is a possible earlier hit than the one before
 				float fraction = inResult.mFraction;
+
+				// CRUMB: a hit at fraction 0 between bodies of which one has compliant shapes is an overlap the
+				// narrow phase already holds a manifold for, and that manifold's soft patch owns it: a rigid hit here
+				// would replace the spring on every step the pair is squashed
+				if (fraction <= 0.0f
+					&& (mBodyManager.GetBody(mCCDBody.mBodyID1).HasCompliantShapes() || mBodyManager.GetBody(inResult.mBodyID2).HasCompliantShapes()))
+					return;
+
 				if (fraction < mCCDBody.mFractionPlusSlop)
 				{
 					// Normalize normal

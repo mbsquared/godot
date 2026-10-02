@@ -965,6 +965,47 @@ real_t JoltPhysicsServer3D::body_get_contact_friction_use(RID p_body, int p_firs
 	return read_contacts(*body, p_first_shape, p_shape_count).friction_use;
 }
 
+bool JoltPhysicsServer3D::soft_surfaces_available() const {
+	// CRUMB: the soft contact's solve, its tails and the reads assume the jobs run one at a time
+	return job_system != nullptr && job_system->is_single_threaded();
+}
+
+void JoltPhysicsServer3D::body_set_shape_soft_surface(RID p_body, int p_shape_idx, const PackedFloat32Array &p_params) {
+	JoltBody3D *body = body_owner.get_or_null(p_body);
+	ERR_FAIL_NULL(body);
+	ERR_FAIL_INDEX(p_shape_idx, body->get_shape_count());
+
+	JoltSoftSurface3D surface;
+	String why;
+	if (!JoltSoftSurface3D::from_params(p_params, surface, why)) {
+		ERR_PRINT(vformat("Refused the soft surface of shape %d of '%s': %s. The shape keeps its surface.", p_shape_idx, body->to_string(), why));
+		return;
+	}
+
+	body->set_shape_soft_surface(p_shape_idx, surface);
+}
+
+PackedInt32Array JoltPhysicsServer3D::space_get_soft_contact_stats(RID p_space) const {
+	const JoltSpace3D *space = space_owner.get_or_null(p_space);
+	ERR_FAIL_NULL_V(space, PackedInt32Array());
+
+	return space->get_soft_contact_stats();
+}
+
+PackedFloat32Array JoltPhysicsServer3D::space_debug_soft_patch(RID p_space, RID p_body_a, int p_shape_a, RID p_body_b, int p_shape_b) const {
+	const JoltSpace3D *space = space_owner.get_or_null(p_space);
+	ERR_FAIL_NULL_V(space, PackedFloat32Array());
+	const JoltBody3D *body_a = body_owner.get_or_null(p_body_a);
+	ERR_FAIL_NULL_V(body_a, PackedFloat32Array());
+	const JoltBody3D *body_b = body_owner.get_or_null(p_body_b);
+	ERR_FAIL_NULL_V(body_b, PackedFloat32Array());
+	if (!body_a->in_space() || !body_b->in_space()) {
+		return PackedFloat32Array();
+	}
+
+	return space->get_soft_patch_debug(body_a->get_jolt_id(), p_shape_a, body_b->get_jolt_id(), p_shape_b);
+}
+
 PackedFloat64Array JoltPhysicsServer3D::shapes_get_volume_properties(const TypedArray<RID> &p_shapes) const {
 	PackedFloat64Array out;
 	out.resize(p_shapes.size() * 10);
