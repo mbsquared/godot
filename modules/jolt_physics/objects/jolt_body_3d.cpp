@@ -582,6 +582,8 @@ void JoltBody3D::_mode_changed() {
 void JoltBody3D::_shapes_committed() {
 	JoltShapedObject3D::_shapes_committed();
 
+	// CRUMB: a removed, replaced or cleared shape takes its soft surface with it
+	_update_soft_shapes();
 	_update_mass_properties();
 	_update_joint_constraints();
 	wake_up();
@@ -1129,26 +1131,31 @@ void JoltBody3D::set_shape_soft_surface(int p_index, const JoltSoftSurface3D &p_
 	ERR_FAIL_COND_MSG(space != nullptr && space->is_stepping(), vformat("Refused a soft surface on '%s' while its space steps. Soft surfaces are set at the bake.", to_string()));
 
 	shapes[p_index].set_soft_surface(p_surface);
+	_update_soft_shapes();
 
+	wake_up();
+}
+
+void JoltBody3D::_update_soft_shapes() {
 	bool soft = false;
 	for (const JoltShapeInstance3D &shape : shapes) {
 		soft = soft || shape.is_soft();
 	}
 
-	if (soft != shape_soft) {
-		shape_soft = soft;
-		const bool use_manifold_reduction = _uses_manifold_reduction();
-		if (!in_space()) {
-			jolt_settings->mHasCompliantShapes = soft;
-			jolt_settings->mUseManifoldReduction = use_manifold_reduction;
-		} else {
-			// Both setters invalidate the body's contact cache, so no manifold of the old size is replayed
-			space->get_body_iface().SetHasCompliantShapes(jolt_body->GetID(), soft);
-			space->get_body_iface().SetUseManifoldReduction(jolt_body->GetID(), use_manifold_reduction);
-		}
+	if (soft == shape_soft) {
+		return;
 	}
 
-	wake_up();
+	shape_soft = soft;
+	const bool use_manifold_reduction = _uses_manifold_reduction();
+	if (!in_space()) {
+		jolt_settings->mHasCompliantShapes = soft;
+		jolt_settings->mUseManifoldReduction = use_manifold_reduction;
+	} else {
+		// Both setters invalidate the body's contact cache, so no manifold of the old size is replayed
+		space->get_body_iface().SetHasCompliantShapes(jolt_body->GetID(), soft);
+		space->get_body_iface().SetUseManifoldReduction(jolt_body->GetID(), use_manifold_reduction);
+	}
 }
 
 const JoltSoftSurface3D *JoltBody3D::get_contact_soft_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id) const {

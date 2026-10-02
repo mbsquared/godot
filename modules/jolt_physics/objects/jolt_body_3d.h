@@ -123,6 +123,10 @@ private:
 	// manifolds, whatever the reduction mode.
 	bool shape_soft = false;
 
+	// CRUMB: shape_soft and the Jolt body's compliant flag from the shapes as they are now (a soft surface set or cleared,
+	// a shape removed, replaced or cleared)
+	void _update_soft_shapes();
+
 	// CRUMB: the contact-force read. One slot per shape, written by the contact listener after each
 	// velocity solve with what the solve applied (impulses, the moment about the centre of mass, the
 	// pressing impulse, the pressing-weighted sum of contact points, the area and the largest friction
