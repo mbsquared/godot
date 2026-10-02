@@ -1586,6 +1586,18 @@ RID JoltPhysicsServer3D::velocity_gear_joint_create(RID p_body_a, const Vector3 
 	return rid;
 }
 
+void JoltPhysicsServer3D::velocity_gear_joint_set_phase_hold(RID p_joint, bool p_enable) {
+	JoltJoint3D *joint = joint_owner.get_or_null(p_joint);
+	ERR_FAIL_NULL(joint);
+
+	// The velocity gear shares JOINT_TYPE_MAX with the gear joint and the empty joint, so the type
+	// cannot tell them apart.
+	JoltVelocityGearJoint3D *velocity_gear = dynamic_cast<JoltVelocityGearJoint3D *>(joint);
+	ERR_FAIL_NULL_MSG(velocity_gear, "velocity_gear_joint_set_phase_hold: the joint is not a velocity gear.");
+
+	velocity_gear->set_phase_hold(p_enable);
+}
+
 void JoltPhysicsServer3D::joint_clear(RID p_joint) {
 	JoltJoint3D *joint = joint_owner.get_or_null(p_joint);
 	ERR_FAIL_NULL(joint);

@@ -440,6 +440,8 @@ public:
 	// CRUMB: the velocity gear among up to three bodies (see PhysicsServer3D). Minted and freed like
 	// gear_joint_create.
 	virtual RID velocity_gear_joint_create(RID p_body_a, const Vector3 &p_axis_a, RID p_body_b, const Vector3 &p_axis_b, RID p_body_c, const Vector3 &p_axis_c, const Vector3 &p_coefficients) override;
+	// CRUMB: its phase hold (see JoltVelocityGearJoint3D), off until switched on.
+	virtual void velocity_gear_joint_set_phase_hold(RID p_joint, bool p_enable) override;
 
 	virtual void joint_set_solver_priority(RID p_joint, int p_priority) override;
 	virtual int joint_get_solver_priority(RID p_joint) const override;
