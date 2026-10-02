@@ -2371,6 +2371,19 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			const double nexp = MAX(fig.n_exp, 1.0);
 			r_patch.mLawExponent = float(nexp);
 			r_patch.mLawCoefficient = float(fig.F / std::pow(MAX(d_deep, 1e-9), nexp));
+		} else if (two_layers) {
+			// Two soft sides across a gap: the series law the pressed patch uses (the two-sided design outside the table,
+			// with its face ratio), read at the squash where the contact's half-width reaches the softer layer's depth,
+			// sqrt(2 R s) = h. The grid cannot resolve a contact much narrower than its cells (N_SHORT cells across a box
+			// of half-width sqrt(2 R s) + h): at a thousandth of the depth it finds no contact at all.
+			const double s_two = MAX(1e-3 * co.h, co.h * co.h / (2.0 * R));
+			CurvedFig ref2;
+			if (curved_outside(cls == 1, s_two, R, co, 0.0, ya, yb, ref2) && !ref2.empty && ref2.F > 0.0) {
+				const double ratio2 = table_ratio(false, shape_factor(ref2.area, ref2.Ixx, ref2.Iyy, soft.thickness), mu, kg_of(soft));
+				const double nexp = MAX(ref2.n_exp, 1.0);
+				r_patch.mLawExponent = float(nexp);
+				r_patch.mLawCoefficient = float(ref2.F * ratio2 / std::pow(s_two, nexp));
+			}
 		}
 	} else if (soft.kind == JoltSoftSurface3D::KIND_SOLID) {
 		const double Es = e_star(soft, partner);
@@ -2554,11 +2567,28 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			r_patch.mRollArm[1] = float(rolling_arm(fig.m1x, loss_side.loss, additive_arm));
 		}
 	} else {
-		// Nothing presses yet: no force, the rows act on the predicted overlap from the deepest point
+		// Nothing presses yet: no force, the rows act on the predicted overlap. A Point's is at its deepest point. A
+		// Line's spreads along it, so its row acts at the centroid of the overlap the line would have one speculative
+		// band (w) deeper than now, d(y) - d_deep + w: a level line at its middle, a cambered one toward the end that
+		// touches first (at the deeper end itself, a level line's row would turn it about the far end)
 		r_patch.mForce = 0.0f;
 		r_patch.mNormalStiffness = 0.0f;
 		r_patch.mNormalDampingRatio = float(loss_side.zeta_for(MAX(double(r_patch.mLawExponent), 1.0)));
 		r_patch.mCentre = r_patch.mDeepest;
+		if (cls == 1) {
+			const double band = MAX(double(JoltProjectSettings::speculative_contact_distance), 1e-9);
+			const double dy = (yb - ya) / N_SLICES;
+			double sp = 0.0, spy = 0.0;
+			for (int i = 0; i < N_SLICES; ++i) {
+				const double y = ya + (double(i) + 0.5) * dy;
+				const double p = MAX(camber * (y - y_deep) + band, 0.0);
+				sp += p;
+				spy += p * y;
+			}
+			if (sp > 0.0) {
+				r_patch.mCentre = line_world(0.0, spy / sp);
+			}
+		}
 	}
 	r_patch.mEnabled = true;
 	r_result.outcome = JoltSoftBuildResult::BUILT;
