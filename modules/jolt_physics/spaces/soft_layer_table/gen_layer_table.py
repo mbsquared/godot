@@ -53,8 +53,11 @@ BONDED_MU = 1.2
 KG = [600.0, 1200.0, 2500.0, 5000.0]
 KG_REF = 2500.0
 I_KG_REF = KG.index(KG_REF)
-T3_S = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
-T4_C = [0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+# T3 and T4 are read linearly in ln S and ln(c/h) (TABLE_FORMAT.md 4.7); at the desk's eight and seven nodes that missed
+# U7's 2 % at off-grid points by up to 4.1 % and 2.9 % (u7_t34.out.txt, first run), so the nodes are denser (data only,
+# the reader takes T3_NUM_S and T4_NUM_C from the header): S steps of sqrt(2), c/h steps of 0.05 below 0.5
+T3_S = [0.25 * 2 ** (k / 2.0) for k in range(15)]
+T4_C = [0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.85, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
 T_SQUASH = 1e-3                                  # T3 and T4 are homogeneous of degree 1: one squash
 INTERP_ORDER = 3
 SCREEN_FLAG = 0.01                               # TABLE_FORMAT.v2.md 3: carries the K/G axis above 1 %
