@@ -41,23 +41,37 @@ public:
 // cache keeps the contact normal, so they keep their meaning when the next step picks other axes.
 struct SoftContactTail
 {
+	static constexpr int	cMaxCores = 8;						// Core rows a patch carries at most (a face's overlap vertices)
+
 	Float3					mFrictionImpulse;					// The friction rows' total impulse on body 2
 	Float3					mMoment;							// The tilt, roll and spin rows' total moment on body 2, about the patch centre
 	Float3					mShear;								// The pre-slip deflection: body 2's contact surface against body 1's
 	float					mNormalImpulse;						// The normal row's total impulse
-	float					mCoreImpulse;						// The core guard's total impulse
+	float					mCoreImpulse[cMaxCores];			// Each core row's total impulse
 	float					mSpinDeflection;					// The pre-slip twist about the normal (rad)
 	float					mEndSquash;							// The deepest overlap the solve left for the end of the step
 	uint32					mFlags;								// See EFlags
 	uint32					mActiveSet[6];						// A face patch's contact set, one bit per grid cell, for the next step's first pass
 	uint8					mGridLong;							// The grid the contact set belongs to
 	uint8					mGridShort;
-	uint16					mReserved;
+	uint8					mNumCores;							// How many core rows mCoreImpulse holds
+	uint8					mReserved;
+
+	// The rigid stick's anchor (AnchorSet): the contact centre as a material point of each body when they were kept (each
+	// body's centre-of-mass frame), the bodies' relative rotation then (body 2 in body 1's frame, x y z w), and what is
+	// carried on top of the points' separation: the surface's own travel and the slip and twist measured when the points
+	// were last kept again (the slip in body 1's frame)
+	Float3					mAnchor1;
+	Float3					mAnchor2;
+	float					mAnchorRotation[4];
+	Float3					mAnchorSlip;
+	float					mAnchorTwist;
 
 	enum EFlags : uint32
 	{
 		OnsetPending		= 1 << 0,							// The episode's first touch is still to be decided (set when the manifold is new)
 		Solved				= 1 << 1,							// A soft solve has written this tail
+		AnchorSet			= 1 << 2,							// A rigid stick holds: mAnchor1, mAnchor2 and mAnchorRotation are the last step's
 	};
 };
 
@@ -104,6 +118,30 @@ struct SoftContactPatch
 	uint32					mActiveSet[6] = { 0, 0, 0, 0, 0, 0 };	// A face patch's contact set, carried to the next step
 	uint8					mGridLong = 0;
 	uint8					mGridShort = 0;
+
+	// The first-touch law: the patch's own pressed law sampled at ascending squashes (mNumLawPoints of them; at least 2 to be
+	// read), between two samples the power law through them, below the first and above the last the end segments' laws.
+	// With fewer than 2 samples the solver reads F = mLawCoefficient s^mLawExponent. mLawDampingRatio: the damping ratios
+	// for a law of exponent 1, 1.5 and 2 (linear between them), which a gap row takes at its segment's exponent.
+	static constexpr int	cMaxLawPoints = 6;
+	float					mLawSquash[cMaxLawPoints] = { 0, 0, 0, 0, 0, 0 };
+	float					mLawForce[cMaxLawPoints] = { 0, 0, 0, 0, 0, 0 };
+	uint8					mNumLawPoints = 0;
+	float					mLawDampingRatio[3] = { 0, 0, 0 };
+
+	// Where a first touch solved as an impact acts, and the overlap there (a Line: the centroid of the overlap one speculative
+	// band deeper than its deepest point; otherwise the deepest point). Without it the impact acts at mDeepest.
+	bool					mHasImpactPoint = false;
+	RVec3					mImpactPoint = RVec3::sZero();
+	float					mImpactSquash = 0.0f;
+
+	// The core guard: a rigid row at each of these points (midway between the surfaces), with the overlap at it at the start
+	// of the step and the layer left there before the cores meet (a face: its overlap's vertices; a Line: its loaded ends; a
+	// Point: its deepest point). Without any, one row at mDeepest with mSquash and mCoreGap.
+	uint8					mNumCores = 0;
+	RVec3					mCorePoint[SoftContactTail::cMaxCores];
+	float					mCoreSquash[SoftContactTail::cMaxCores] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+	float					mCoreGapAt[SoftContactTail::cMaxCores] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 };
 
 /// When a contact point is added or persisted, the callback gets a chance to override certain properties of the contact constraint.

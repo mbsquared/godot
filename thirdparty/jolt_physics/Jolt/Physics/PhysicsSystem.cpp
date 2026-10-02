@@ -1558,7 +1558,12 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 			// time step) resulting in a lot of stolen time and the body appearing to be frozen in an unnatural pose (like it is glued at an angle to the surface). (2) obviously has some negative side effects
 			// too as simulating the rotation first may cause it to tunnel through a small object that the linear cast might have otherwise detected. In any case a linear cast is not good for detecting
 			// tunneling due to angular rotation, so we don't care about that too much (you'd need a full cast to take angular effects into account).
-			body.AddRotationStep(body.GetAngularVelocity() * delta_time);
+			// CRUMB: a body with compliant shapes integrates every turn its velocity gives, the small ones too (see
+			// Body::AddRotationStepCompliant)
+			if (body.HasCompliantShapes())
+				body.AddRotationStepCompliant(body.GetAngularVelocity() * delta_time);
+			else
+				body.AddRotationStep(body.GetAngularVelocity() * delta_time);
 
 			// Get delta position
 			Vec3 delta_pos = body.GetLinearVelocity() * delta_time;

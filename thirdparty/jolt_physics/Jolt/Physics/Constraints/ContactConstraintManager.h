@@ -256,7 +256,9 @@ public:
 	// CRUMB: the compliant contact (soft patches). InitSoftContacts sets how many soft patches one step can
 	// solve: 0, the default, keeps every contact rigid as before; a manifold beyond the limit stays rigid and
 	// is counted. inBlockWarmStart false leaves the soft rows to last step's warm start alone (a test switch).
-	void						InitSoftContacts(uint inMaxPatches, bool inBlockWarmStart = true)		{ mMaxSoftPatches = inMaxPatches; mSoftBlockWarmStart = inBlockWarmStart; }
+	// The count is held within cMaxSoftPatchesLimit, so the step's side table always fits one allocation.
+	static constexpr uint		cMaxSoftPatchesLimit = 65536;
+	void						InitSoftContacts(uint inMaxPatches, bool inBlockWarmStart = true)		{ mMaxSoftPatches = min(inMaxPatches, cMaxSoftPatchesLimit); mSoftBlockWarmStart = inBlockWarmStart; }
 	uint						GetMaxSoftContactPatches() const									{ return mMaxSoftPatches; }
 
 	// CRUMB: the last step's soft-contact counts, for the status line and the probes
@@ -545,22 +547,30 @@ private:
 	struct SoftPatchConstraint
 	{
 		SoftRow					mNormal;
-		SoftRow					mCore;
+		SoftRow					mCore[SoftContactTail::cMaxCores];	// the core guard, a rigid row at each core point
 		SoftRow					mFriction[3];						// tangent 1, tangent 2, spin about the normal
 		SoftRow					mTilt[2];
 		SoftRow					mRoll[2];
-		AxisConstraintPart		mPositionPart;						// the core guard's (and an impact's) position correction
+		AxisConstraintPart		mPositionPart;						// the core guard's (and an impact's) position correction, one point at a time
 		RVec3					mCentre;
 		Vec3					mNormalAxis;
 		Vec3					mTangent1;
 		Vec3					mTangent2;
 		Float3					mDeepLocal1;						// the deepest point on each surface, in each body's centre-of-mass frame
 		Float3					mDeepLocal2;
+		Float3					mImpactLocal1;						// where an impact acts, on each surface, in each body's centre-of-mass frame
+		Float3					mImpactLocal2;
+		Float3					mCoreLocal1[SoftContactTail::cMaxCores];	// each core point on each surface, likewise
+		Float3					mCoreLocal2[SoftContactTail::cMaxCores];
+		float					mCoreLayer[SoftContactTail::cMaxCores];	// the layer's whole depth at each core point (where the cores meet)
+		Vec3					mSurfaceVelocity;					// the contact's relative surface velocity at the centre, in the tangent plane
+		float					mSurfaceSpin;						// and its relative surface spin about the normal
 		double					mFrictionMatrix[9];					// the friction block's J M^-1 J^T plus softness, for the ellipse
 		SoftContactTail *		mTail;								// this step's tail in the write cache
 		float					mDeltaTime;
 		float					mSquash;
-		float					mLayer;								// the layer's whole depth at mDeepest (where the cores meet)
+		float					mRelaxE;							// the pre-slip deflection's decay over the step's rolling, e^-x (x = rolling h / L)
+		float					mRelaxPhi;							// (1 - e^-x) / x, the share of the step's slip the deflection keeps
 		float					mTiltArmNeg[2];
 		float					mTiltArmPos[2];
 		float					mRollArm[2];
@@ -577,7 +587,10 @@ private:
 		uint8					mClass;
 		uint8					mNumTilt;
 		uint8					mNumRoll;
+		uint8					mNumCores;
 		bool					mImpact;							// this step's first touch is solved as an impact
+		bool					mBandRow;							// a patch inside the band that will not touch: its normal row is a gap row only
+		bool					mAnchored;							// the rigid stick's rows carry the anchor's bias this step
 		bool					mDecided;							// the first touch was decided this step (OnsetPending clears)
 		bool					mGap;								// nothing presses at the start of the step
 		bool					mRigidStick;
@@ -587,7 +600,7 @@ private:
 	};
 
 	// CRUMB: set up a manifold's soft patch (TemplatedAddContactConstraint)
-	void						SetupSoftPatch(ContactConstraint &ioConstraint, SoftPatchConstraint &outPatch, const SoftContactPatch &inPatch, SoftContactTail &ioTail, bool inWarm, float inInvM1, Mat44Arg inInvI1, float inInvM2, Mat44Arg inInvI2, float inDeltaTime, Vec3Arg inGravity);
+	void						SetupSoftPatch(ContactConstraint &ioConstraint, SoftPatchConstraint &outPatch, const SoftContactPatch &inPatch, SoftContactTail &ioTail, bool inWarm, float inInvM1, Mat44Arg inInvI1, float inInvM2, Mat44Arg inInvI2, float inDeltaTime, Vec3Arg inGravity, Vec3Arg inSurfaceLinear, Vec3Arg inSurfaceAngular);
 
 	// CRUMB: a soft patch's warm start, sweep, stored impulses and report, and position pass
 	void						WarmStartSoftPatch(ContactConstraint &ioConstraint, float inWarmStartImpulseRatio);

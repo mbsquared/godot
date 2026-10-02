@@ -353,6 +353,22 @@ public:
 	inline void				AddRotationStep(Vec3Arg inAngularVelocityTimesDeltaTime);
 	inline void				SubRotationStep(Vec3Arg inAngularVelocityTimesDeltaTime);
 
+	// CRUMB: AddRotationStep without its floor: AddRotationStep leaves out a turn of 1e-6 rad or less, so a body that turns
+	// slowly keeps its rotation while its centre of mass moves with the same velocities. A body with compliant shapes reads
+	// its contact law from its exact pose, and a small steady turn its law would answer (a moment its tilt rows only damp
+	// until the turn shows in the pose) left out step after step lets the body drift: a soft tyre at rest crept sideways at
+	// a steady spin about its rolling direction that its pose never showed. This applies every turn.
+	inline void				AddRotationStepCompliant(Vec3Arg inAngularVelocityTimesDeltaTime)
+	{
+		JPH_ASSERT(IsRigidBody());
+		float len = inAngularVelocityTimesDeltaTime.Length();
+		if (len > 0.0f)
+		{
+			mRotation = (Quat::sRotation(inAngularVelocityTimesDeltaTime / len, len) * mRotation).Normalized();
+			JPH_ASSERT(!mRotation.IsNaN());
+		}
+	}
+
 	/// Flag if body is in the broadphase (should only be called by the BroadPhase)
 	inline void				SetInBroadPhaseInternal(bool inInBroadPhase)					{ if (inInBroadPhase) mFlags.fetch_or(uint8(EFlags::IsInBroadPhase), memory_order_relaxed); else mFlags.fetch_and(uint8(~uint8(EFlags::IsInBroadPhase)), memory_order_relaxed); }
 
