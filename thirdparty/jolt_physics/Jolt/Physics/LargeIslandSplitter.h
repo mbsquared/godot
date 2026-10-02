@@ -134,7 +134,8 @@ public:
 							~LargeIslandSplitter();
 
 	/// Prepare the island splitter by allocating memory
-	void					Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator);
+	/// CRUMB: with inContactManager, an island holding a soft patch is left out of the count, since it is solved whole
+	void					Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator, const ContactConstraintManager *inContactManager = nullptr);
 
 	/// Assign two bodies to a split. Returns the split index.
 	uint					AssignSplit(const Body *inBody1, const Body *inBody2);

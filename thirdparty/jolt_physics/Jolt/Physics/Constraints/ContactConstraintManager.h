@@ -276,6 +276,10 @@ public:
 	// and its softness. Returns true when the island holds a soft patch (it is then never split).
 	bool						FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
 
+	// CRUMB: whether an island's contacts hold a soft patch. Such an island is solved whole and never split, so
+	// the large island splitter leaves it out of its count and the position solve takes it as an ordinary island.
+	bool						HasSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const;
+
 	// CRUMB: per island, after its warm start: the compliant rows of each soft cluster (patches linked through
 	// dynamic bodies) corrected together on what the warm start left over, then clamped.
 	void						WarmStartSoftClusters(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);

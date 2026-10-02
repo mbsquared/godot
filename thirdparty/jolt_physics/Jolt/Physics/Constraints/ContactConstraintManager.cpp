@@ -2494,19 +2494,19 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 	ioTail.mGridShort = inPatch.mGridShort;
 }
 
-bool ContactConstraintManager::FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
+bool ContactConstraintManager::HasSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const
 {
 	if (mSoftPatches == nullptr)
 		return false;
-
-	bool any = false;
 	for (const uint32 *idx = inConstraintIdxBegin; idx < inConstraintIdxEnd; ++idx)
 		if (mConstraints[*idx].mSoftPatchIndex != cNoSoftPatch)
-		{
-			any = true;
-			break;
-		}
-	if (!any)
+			return true;
+	return false;
+}
+
+bool ContactConstraintManager::FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
+{
+	if (!HasSoftPatches(inConstraintIdxBegin, inConstraintIdxEnd))
 		return false;
 
 	// The pair-sum bound (SOFT-CONTACT brief 5.4): S_b sums k w over the compliant rows of each dynamic body;
@@ -2656,12 +2656,21 @@ void ContactConstraintManager::WarmStartSoftPatch(ContactConstraint &ioConstrain
 		start(p.mRoll[i], moment.Dot(p.mRoll[i].mAngular2));
 	}
 
-	// A fixed friction block keeps within the soft-finger ellipse of the normal impulse it starts with
+	// A fixed friction block keeps within the soft-finger ellipse of the normal impulse it starts with. Past the static
+	// ellipse it slides on the kinetic one, as a solved block does: its pre-slip deflection then follows the impulse it
+	// carried (StoreSoftPatch), never the relative motion, or a spring clamped while the normal force dips would store
+	// a deflection it could not carry and give it back when the force returns.
 	if (p.mFrictionFixed)
 	{
 		double l[3] = { p.mFriction[0].mTotalLambda, p.mFriction[1].mTotalLambda, p.mFriction[2].mTotalLambda };
 		double identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-		sSoftFingerProject(identity, l, double(p.mStaticFriction) * double(max(p.mNormal.mTotalLambda, 0.0f)), p.mSpinRadius);
+		double L = double(max(p.mNormal.mTotalLambda, 0.0f));
+		double probe[3] = { l[0], l[1], l[2] };
+		if (sSoftFingerProject(identity, probe, double(p.mStaticFriction) * L, p.mSpinRadius))
+		{
+			sSoftFingerProject(identity, l, double(p.mSlidingFriction) * L, p.mSpinRadius);
+			p.mSliding = true;
+		}
 		for (int i = 0; i < 3; ++i)
 			p.mFriction[i].mTotalLambda = float(l[i]);
 	}

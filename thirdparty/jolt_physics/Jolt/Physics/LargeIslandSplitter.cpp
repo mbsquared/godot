@@ -183,7 +183,7 @@ LargeIslandSplitter::~LargeIslandSplitter()
 	JPH_ASSERT(mSplitIslands == nullptr);
 }
 
-void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
+void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator, const ContactConstraintManager *inContactManager)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -204,6 +204,10 @@ void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 i
 		uint island_size = num_contacts_in_island + num_constraints_in_island;
 		if (island_size >= cLargeIslandTreshold)
 		{
+			// CRUMB: an island with a soft patch is solved whole and never split, so no split of it will come
+			if (inContactManager != nullptr && inContactManager->HasSoftPatches(contacts_start, contacts_end))
+				continue;
+
 			mNumSplitIslands++;
 			mContactAndConstraintsSize += island_size;
 		}

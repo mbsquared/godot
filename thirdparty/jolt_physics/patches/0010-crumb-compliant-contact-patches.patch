@@ -244,7 +244,7 @@ index 0a8a4a9730..adb38544f0 100644
  	inline bool					IsActive() const
  	{
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
-index acb0985483..91db89d3e3 100644
+index acb0985483..cc78adab7f 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
 +++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
 @@ -304,16 +304,18 @@ const ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCac
@@ -587,7 +587,7 @@ index acb0985483..91db89d3e3 100644
  	// Free constraints buffer
  	mUpdateContext->mTempAllocator->Free(mConstraints, mMaxConstraints * sizeof(ContactConstraint));
  	mConstraints = nullptr;
-@@ -1865,4 +2002,1089 @@ bool ContactConstraintManager::RestoreState(StateRecorder &inStream, const State
+@@ -1865,4 +2002,1098 @@ bool ContactConstraintManager::RestoreState(StateRecorder &inStream, const State
  	return success;
  }
  
@@ -1083,19 +1083,19 @@ index acb0985483..91db89d3e3 100644
 +	ioTail.mGridShort = inPatch.mGridShort;
 +}
 +
-+bool ContactConstraintManager::FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
++bool ContactConstraintManager::HasSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const
 +{
 +	if (mSoftPatches == nullptr)
 +		return false;
-+
-+	bool any = false;
 +	for (const uint32 *idx = inConstraintIdxBegin; idx < inConstraintIdxEnd; ++idx)
 +		if (mConstraints[*idx].mSoftPatchIndex != cNoSoftPatch)
-+		{
-+			any = true;
-+			break;
-+		}
-+	if (!any)
++			return true;
++	return false;
++}
++
++bool ContactConstraintManager::FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
++{
++	if (!HasSoftPatches(inConstraintIdxBegin, inConstraintIdxEnd))
 +		return false;
 +
 +	// The pair-sum bound (SOFT-CONTACT brief 5.4): S_b sums k w over the compliant rows of each dynamic body;
@@ -1245,12 +1245,21 @@ index acb0985483..91db89d3e3 100644
 +		start(p.mRoll[i], moment.Dot(p.mRoll[i].mAngular2));
 +	}
 +
-+	// A fixed friction block keeps within the soft-finger ellipse of the normal impulse it starts with
++	// A fixed friction block keeps within the soft-finger ellipse of the normal impulse it starts with. Past the static
++	// ellipse it slides on the kinetic one, as a solved block does: its pre-slip deflection then follows the impulse it
++	// carried (StoreSoftPatch), never the relative motion, or a spring clamped while the normal force dips would store
++	// a deflection it could not carry and give it back when the force returns.
 +	if (p.mFrictionFixed)
 +	{
 +		double l[3] = { p.mFriction[0].mTotalLambda, p.mFriction[1].mTotalLambda, p.mFriction[2].mTotalLambda };
 +		double identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-+		sSoftFingerProject(identity, l, double(p.mStaticFriction) * double(max(p.mNormal.mTotalLambda, 0.0f)), p.mSpinRadius);
++		double L = double(max(p.mNormal.mTotalLambda, 0.0f));
++		double probe[3] = { l[0], l[1], l[2] };
++		if (sSoftFingerProject(identity, probe, double(p.mStaticFriction) * L, p.mSpinRadius))
++		{
++			sSoftFingerProject(identity, l, double(p.mSlidingFriction) * L, p.mSpinRadius);
++			p.mSliding = true;
++		}
 +		for (int i = 0; i < 3; ++i)
 +			p.mFriction[i].mTotalLambda = float(l[i]);
 +	}
@@ -1678,10 +1687,10 @@ index acb0985483..91db89d3e3 100644
 +
  JPH_NAMESPACE_END
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.h b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.h
-index cbdc1b5700..45157b3d68 100644
+index cbdc1b5700..c6da51da6b 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.h
 +++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.h
-@@ -253,6 +253,33 @@ public:
+@@ -253,6 +253,37 @@ public:
  	/// Restoring state for replay. Returns false when failed.
  	bool						RestoreState(StateRecorder &inStream, const StateRecorderFilter *inFilter);
  
@@ -1708,6 +1717,10 @@ index cbdc1b5700..45157b3d68 100644
 +	// and its softness. Returns true when the island holds a soft patch (it is then never split).
 +	bool						FinalizeSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
 +
++	// CRUMB: whether an island's contacts hold a soft patch. Such an island is solved whole and never split, so
++	// the large island splitter leaves it out of its count and the position solve takes it as an ordinary island.
++	bool						HasSoftPatches(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const;
++
 +	// CRUMB: per island, after its warm start: the compliant rows of each soft cluster (patches linked through
 +	// dynamic bodies) corrected together on what the warm start left over, then clamped.
 +	void						WarmStartSoftClusters(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
@@ -1715,7 +1728,7 @@ index cbdc1b5700..45157b3d68 100644
  private:
  	/// Local space contact point, used for caching impulses
  	class CachedContactPoint
-@@ -282,6 +309,14 @@ private:
+@@ -282,6 +313,14 @@ private:
  		/// Calculate size in bytes needed beyond the size of the class to store inNumContactPoints
  		static int				sGetRequiredExtraSize(int inNumContactPoints)						{ return max(0, inNumContactPoints - 1) * sizeof(CachedContactPoint); }
  
@@ -1730,7 +1743,7 @@ index cbdc1b5700..45157b3d68 100644
  		/// Calculate total class size needed for storing inNumContactPoints
  		static int				sGetRequiredTotalSize(int inNumContactPoints)						{ return sizeof(CachedManifold) + sGetRequiredExtraSize(inNumContactPoints); }
  
-@@ -300,7 +335,8 @@ private:
+@@ -300,7 +339,8 @@ private:
  		enum class EFlags : uint16
  		{
  			ContactPersisted	= 1,																///< If this cache entry was reused in the next simulation update
@@ -1740,7 +1753,7 @@ index cbdc1b5700..45157b3d68 100644
  		};
  
  		/// @see EFlags
-@@ -367,7 +403,7 @@ private:
+@@ -367,7 +407,7 @@ private:
  
  		/// Find / create cached entry for SubShapeIDPair -> CachedManifold
  		const MKeyValue *		Find(const SubShapeIDPair &inKey, uint64 inKeyHash) const;
@@ -1749,7 +1762,7 @@ index cbdc1b5700..45157b3d68 100644
  		MKVAndCreated			FindOrCreate(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
  		uint32					ToHandle(const MKeyValue *inKeyValue) const;
  		const MKeyValue *		FromHandle(uint32 inHandle) const;
-@@ -472,13 +508,102 @@ private:
+@@ -472,13 +512,102 @@ private:
  		SubShapeID				mSubShapeID1;						// CRUMB: the manifold's sub-shapes, for OnContactSolved
  		SubShapeID				mSubShapeID2;
  		bool					mReportSolved = false;				// CRUMB: ContactSettings::mReportSolved
@@ -1852,7 +1865,7 @@ index cbdc1b5700..45157b3d68 100644
  	/// The maximum value that can be passed to Init for inMaxContactConstraints. Note you should really use a lower value, using this value will cost a lot of memory!
  	static constexpr uint		cMaxContactConstraintsLimit = ~uint(0) / sizeof(ContactConstraint);
  
-@@ -522,6 +647,13 @@ private:
+@@ -522,6 +651,13 @@ private:
  
  	/// Context used for this physics update
  	PhysicsUpdateContext *		mUpdateContext;
@@ -1866,10 +1879,60 @@ index cbdc1b5700..45157b3d68 100644
  };
  
  JPH_NAMESPACE_END
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/LargeIslandSplitter.cpp b/thirdparty/jolt_physics/Jolt/Physics/LargeIslandSplitter.cpp
+index 50ab1c583f..06f7ff393f 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/LargeIslandSplitter.cpp
++++ b/thirdparty/jolt_physics/Jolt/Physics/LargeIslandSplitter.cpp
+@@ -183,7 +183,7 @@ LargeIslandSplitter::~LargeIslandSplitter()
+ 	JPH_ASSERT(mSplitIslands == nullptr);
+ }
+ 
+-void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
++void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator, const ContactConstraintManager *inContactManager)
+ {
+ 	JPH_PROFILE_FUNCTION();
+ 
+@@ -204,6 +204,10 @@ void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 i
+ 		uint island_size = num_contacts_in_island + num_constraints_in_island;
+ 		if (island_size >= cLargeIslandTreshold)
+ 		{
++			// CRUMB: an island with a soft patch is solved whole and never split, so no split of it will come
++			if (inContactManager != nullptr && inContactManager->HasSoftPatches(contacts_start, contacts_end))
++				continue;
++
+ 			mNumSplitIslands++;
+ 			mContactAndConstraintsSize += island_size;
+ 		}
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/LargeIslandSplitter.h b/thirdparty/jolt_physics/Jolt/Physics/LargeIslandSplitter.h
+index 36f0d61401..499515adda 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/LargeIslandSplitter.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/LargeIslandSplitter.h
+@@ -134,7 +134,8 @@ public:
+ 							~LargeIslandSplitter();
+ 
+ 	/// Prepare the island splitter by allocating memory
+-	void					Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator);
++	/// CRUMB: with inContactManager, an island holding a soft patch is left out of the count, since it is solved whole
++	void					Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator, const ContactConstraintManager *inContactManager = nullptr);
+ 
+ 	/// Assign two bodies to a split. Returns the split index.
+ 	uint					AssignSplit(const Body *inBody1, const Body *inBody2);
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
-index 59e030325c..7753df4a4b 100644
+index 59e030325c..a23bdc7ec8 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
 +++ b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
+@@ -1292,9 +1292,9 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
+ 	// Finish collecting the islands, at this point the active body list doesn't change so it's safe to access
+ 	mIslandBuilder.Finalize(mBodyManager.GetActiveBodiesUnsafe(EBodyType::RigidBody), mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), mContactManager.GetNumConstraints(), ioContext->mTempAllocator);
+ 
+-	// Prepare the large island splitter
++	// Prepare the large island splitter (CRUMB: islands with soft patches are solved whole, so they are not counted)
+ 	if (mPhysicsSettings.mUseLargeIslandSplitter)
+-		mLargeIslandSplitter.Prepare(mIslandBuilder, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
++		mLargeIslandSplitter.Prepare(mIslandBuilder, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator, &mContactManager);
+ }
+ 
+ void PhysicsSystem::JobBodySetIslandIndex()
 @@ -1424,9 +1424,14 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
  				mContactManager.SortContacts(contacts_begin, contacts_end);
  			}
@@ -1911,6 +1974,19 @@ index 59e030325c..7753df4a4b 100644
  				if (fraction < mCCDBody.mFractionPlusSlop)
  				{
  					// Normalize normal
+@@ -2477,9 +2494,11 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
+ 			mIslandBuilder.GetContactsInIsland(island_idx, contacts_begin, contacts_end);
+ 
+ 			// If this island is a large island, it will be picked up as a batch and we don't need to do anything here
++			// (CRUMB: unless it holds a soft patch: then the velocity solve kept it whole and it is solved here)
+ 			uint num_items = uint(constraints_end - constraints_begin) + uint(contacts_end - contacts_begin);
+ 			if (mPhysicsSettings.mUseLargeIslandSplitter
+-				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold)
++				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold
++				&& !mContactManager.HasSoftPatches(contacts_begin, contacts_end))
+ 				continue;
+ 
+ 			// Check if this island needs solving
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.h b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.h
 index 8ba7b1e1f3..1d96cd0e6d 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.h

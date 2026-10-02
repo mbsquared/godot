@@ -1292,9 +1292,9 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 	// Finish collecting the islands, at this point the active body list doesn't change so it's safe to access
 	mIslandBuilder.Finalize(mBodyManager.GetActiveBodiesUnsafe(EBodyType::RigidBody), mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), mContactManager.GetNumConstraints(), ioContext->mTempAllocator);
 
-	// Prepare the large island splitter
+	// Prepare the large island splitter (CRUMB: islands with soft patches are solved whole, so they are not counted)
 	if (mPhysicsSettings.mUseLargeIslandSplitter)
-		mLargeIslandSplitter.Prepare(mIslandBuilder, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
+		mLargeIslandSplitter.Prepare(mIslandBuilder, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator, &mContactManager);
 }
 
 void PhysicsSystem::JobBodySetIslandIndex()
@@ -2494,9 +2494,11 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 			mIslandBuilder.GetContactsInIsland(island_idx, contacts_begin, contacts_end);
 
 			// If this island is a large island, it will be picked up as a batch and we don't need to do anything here
+			// (CRUMB: unless it holds a soft patch: then the velocity solve kept it whole and it is solved here)
 			uint num_items = uint(constraints_end - constraints_begin) + uint(contacts_end - contacts_begin);
 			if (mPhysicsSettings.mUseLargeIslandSplitter
-				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold)
+				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold
+				&& !mContactManager.HasSoftPatches(contacts_begin, contacts_end))
 				continue;
 
 			// Check if this island needs solving
