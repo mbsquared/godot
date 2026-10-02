@@ -2775,11 +2775,12 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 		}
 	}
 
-	// The face grid's contact set, for the next step's first pass
-	for (int i = 0; i < 6; ++i)
+	// The face grid's contact sets, for the next step's first pass
+	for (int i = 0; i < SoftContactTail::cActiveSetWords; ++i)
 		ioTail.mActiveSet[i] = inPatch.mActiveSet[i];
 	ioTail.mGridLong = inPatch.mGridLong;
 	ioTail.mGridShort = inPatch.mGridShort;
+	ioTail.mGridKind = inPatch.mGridKind;
 }
 
 // The core rows' total impulse that presses (each clamped at zero)

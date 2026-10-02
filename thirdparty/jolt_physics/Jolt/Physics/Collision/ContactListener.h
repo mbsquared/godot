@@ -42,6 +42,16 @@ public:
 struct SoftContactTail
 {
 	static constexpr int	cMaxCores = 8;						// Core rows a patch carries at most (a face's overlap vertices)
+	static constexpr int	cActiveSetWords = 64;				// A face patch's contact sets: two fields of at most 1024 cells each
+
+	// Which face law wrote mActiveSet (mGridKind)
+	enum EGridKind : uint8
+	{
+		GridNone			= 0,
+		GridSplit			= 1,								// The split law: one set in the first words, mGridLong by mGridShort cells
+		GridFaceV2			= 2,								// The face law v2: the frictionless field's set, then the no-slip field's, mGridLong by mGridShort cells
+		GridFaceV2NoLub		= 3,								// The same with no frictionless set (that field was not solved)
+	};
 
 	Float3					mFrictionImpulse;					// The friction rows' total impulse on body 2
 	Float3					mMoment;							// The tilt, roll and spin rows' total moment on body 2, about the patch centre
@@ -51,11 +61,11 @@ struct SoftContactTail
 	float					mSpinDeflection;					// The pre-slip twist about the normal (rad)
 	float					mEndSquash;							// The deepest overlap the solve left for the end of the step
 	uint32					mFlags;								// See EFlags
-	uint32					mActiveSet[6];						// A face patch's contact set, one bit per grid cell, for the next step's first pass
-	uint8					mGridLong;							// The grid the contact set belongs to
+	uint32					mActiveSet[cActiveSetWords];		// A face patch's contact sets, one bit per grid cell, for the next step's first pass
+	uint8					mGridLong;							// The grid the contact sets belong to (its cell counts)
 	uint8					mGridShort;
 	uint8					mNumCores;							// How many core rows mCoreImpulse holds
-	uint8					mReserved;
+	uint8					mGridKind;							// See EGridKind
 
 	// The rigid stick's anchor (AnchorSet): the contact centre as a material point of each body when they were kept (each
 	// body's centre-of-mass frame), the bodies' relative rotation then (body 2 in body 1's frame, x y z w), and what is
@@ -115,9 +125,10 @@ struct SoftContactPatch
 	float					mRollingRadius = 0.0f;				// Turns a relative spin about an in-plane axis into rolling speed
 	float					mArea = 0.0f;
 	float					mCoreGap = 0.0f;					// Layer left at mDeepest before the cores meet
-	uint32					mActiveSet[6] = { 0, 0, 0, 0, 0, 0 };	// A face patch's contact set, carried to the next step
+	uint32					mActiveSet[SoftContactTail::cActiveSetWords] = {};	// A face patch's contact sets, carried to the next step
 	uint8					mGridLong = 0;
 	uint8					mGridShort = 0;
+	uint8					mGridKind = SoftContactTail::GridNone;	// Which face law wrote mActiveSet
 
 	// The first-touch law: the patch's own pressed law sampled at ascending squashes (mNumLawPoints of them; at least 2 to be
 	// read), between two samples the power law through them, below the first and above the last the end segments' laws.
