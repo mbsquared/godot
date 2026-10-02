@@ -114,12 +114,14 @@ private:
 	bool soft_overflow_reported = false;
 	bool soft_shear_enabled = true;
 
+	// The last step's patch figures, kept only with physics/jolt_physics_3d/debug/soft_patch_figures on: fixed-size records
+	// in room that grows only when a step has more patches than any before, so a step allocates nothing once warm
 	struct SoftPatchRecord {
 		JPH::BodyID body1;
 		JPH::BodyID body2;
 		int shape1 = -1;
 		int shape2 = -1;
-		PackedFloat32Array figures;
+		float figures[JOLT_SOFT_PATCH_FIGURES] = {};
 	};
 	Mutex soft_records_mutex;
 	LocalVector<SoftPatchRecord> soft_records;
@@ -193,6 +195,8 @@ public:
 	bool are_soft_contacts_enabled() const { return soft_contacts_enabled; }
 	bool is_soft_shear_enabled() const { return soft_shear_enabled; }
 	void count_soft_contact(SoftCount p_count) { soft_counts[p_count].increment(); }
+	// Whether the step keeps its patch figures (physics/jolt_physics_3d/debug/soft_patch_figures)
+	static bool are_soft_patch_figures_kept();
 	void record_soft_patch(const JPH::BodyID &p_body1, int p_shape1, const JPH::BodyID &p_body2, int p_shape2, const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind);
 	PackedInt32Array get_soft_contact_stats() const;
 	PackedFloat32Array get_soft_patch_debug(const JPH::BodyID &p_body_a, int p_shape_a, const JPH::BodyID &p_body_b, int p_shape_b) const;

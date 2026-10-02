@@ -327,8 +327,10 @@ bool JoltContactListener3D::_try_apply_soft_patch(const JPH::Body &p_jolt_body1,
 		if (result.not_settled) {
 			space->count_soft_contact(JoltSpace3D::SOFT_COUNT_NOT_SETTLED);
 		}
-		const int kind = surface1 != nullptr ? surface1->kind : surface2->kind;
-		space->record_soft_patch(p_jolt_body1.GetID(), body1->find_shape_index(p_manifold.mSubShapeID1), p_jolt_body2.GetID(), body2->find_shape_index(p_manifold.mSubShapeID2), *p_settings.mSoftPatch, p_manifold.mWorldSpaceNormal, result, kind);
+		if (JoltSpace3D::are_soft_patch_figures_kept()) {
+			const int kind = surface1 != nullptr ? surface1->kind : surface2->kind;
+			space->record_soft_patch(p_jolt_body1.GetID(), body1->find_shape_index(p_manifold.mSubShapeID1), p_jolt_body2.GetID(), body2->find_shape_index(p_manifold.mSubShapeID2), *p_settings.mSoftPatch, p_manifold.mWorldSpaceNormal, result, kind);
+		}
 	} else if (result.outcome == JoltSoftBuildResult::SOLID_FACE) {
 		space->count_soft_contact(JoltSpace3D::SOFT_COUNT_SOLID_FACE);
 	} else {

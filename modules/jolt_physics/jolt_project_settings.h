@@ -100,6 +100,7 @@ public:
 	inline static int max_body_pairs;
 	inline static int max_contact_constraints;
 	inline static int max_soft_contact_patches; // CRUMB
+	inline static bool soft_patch_figures; // CRUMB
 
 	static void register_settings();
 	static void read_settings();

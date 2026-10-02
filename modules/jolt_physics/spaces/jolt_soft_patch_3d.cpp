@@ -2746,11 +2746,9 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	return true;
 }
 
-PackedFloat32Array jolt_soft_patch_debug_array(const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind) {
-	PackedFloat32Array a;
-	a.resize(40);
-	float *w = a.ptrw();
-	for (int i = 0; i < 40; ++i) {
+void jolt_soft_patch_debug_figures(const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind, float *r_figures) {
+	float *w = r_figures;
+	for (int i = 0; i < JOLT_SOFT_PATCH_FIGURES; ++i) {
 		w[i] = 0.0f;
 	}
 	w[0] = float(p_patch.mClass);
@@ -2793,5 +2791,4 @@ PackedFloat32Array jolt_soft_patch_debug_array(const JPH::SoftContactPatch &p_pa
 	w[37] = float(p_patch.mDeepest.GetZ());
 	w[38] = p_patch.mRelaxationLength;
 	w[39] = p_patch.mRigidStick ? 1.0f : 0.0f;
-	return a;
 }

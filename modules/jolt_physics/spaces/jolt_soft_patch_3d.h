@@ -127,5 +127,7 @@ struct JoltSoftPatchInput {
 // Builds one manifold's patch. Returns true with r_patch enabled when the contact is soft this step.
 bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch &r_patch, JoltSoftBuildResult &r_result);
 
-// The patch figures as space_debug_soft_patch returns them (documented at JoltPhysicsServer3D::space_debug_soft_patch)
-PackedFloat32Array jolt_soft_patch_debug_array(const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind);
+// The patch figures as space_debug_soft_patch returns them (documented at JoltPhysicsServer3D::space_debug_soft_patch),
+// written into r_figures (JOLT_SOFT_PATCH_FIGURES floats); no allocation
+constexpr int JOLT_SOFT_PATCH_FIGURES = 40;
+void jolt_soft_patch_debug_figures(const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind, float *r_figures);

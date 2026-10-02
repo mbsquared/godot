@@ -345,7 +345,7 @@ void JoltSpace3D::step(float p_step) {
 	for (int i = 0; i < SOFT_COUNT_MAX; ++i) {
 		soft_counts[i].set(0);
 	}
-	{
+	if (soft_record_count > 0) {
 		MutexLock lock(soft_records_mutex);
 		soft_record_count = 0;
 	}
@@ -419,16 +419,23 @@ float JoltSpace3D::combine_friction(float p_friction1, float p_friction2) {
 }
 
 void JoltSpace3D::record_soft_patch(const JPH::BodyID &p_body1, int p_shape1, const JPH::BodyID &p_body2, int p_shape2, const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind) {
+	if (!JoltProjectSettings::soft_patch_figures) {
+		return;
+	}
 	MutexLock lock(soft_records_mutex);
 	if (soft_record_count >= soft_records.size()) {
-		soft_records.resize(soft_record_count + 1);
+		soft_records.resize(MAX(soft_record_count + 1, (uint32_t)CLAMP(JoltProjectSettings::max_soft_contact_patches, 16, 4096)));
 	}
 	SoftPatchRecord &record = soft_records[soft_record_count++];
 	record.body1 = p_body1;
 	record.body2 = p_body2;
 	record.shape1 = p_shape1;
 	record.shape2 = p_shape2;
-	record.figures = jolt_soft_patch_debug_array(p_patch, p_normal, p_result, p_kind);
+	jolt_soft_patch_debug_figures(p_patch, p_normal, p_result, p_kind, record.figures);
+}
+
+bool JoltSpace3D::are_soft_patch_figures_kept() {
+	return JoltProjectSettings::soft_patch_figures;
 }
 
 PackedInt32Array JoltSpace3D::get_soft_contact_stats() const {
@@ -465,7 +472,10 @@ PackedFloat32Array JoltSpace3D::get_soft_patch_debug(const JPH::BodyID &p_body_a
 		const bool forward = record.body1 == p_body_a && record.shape1 == p_shape_a && record.body2 == p_body_b && record.shape2 == p_shape_b;
 		const bool reverse = record.body1 == p_body_b && record.shape1 == p_shape_b && record.body2 == p_body_a && record.shape2 == p_shape_a;
 		if (forward || reverse) {
-			return record.figures;
+			PackedFloat32Array figures;
+			figures.resize(JOLT_SOFT_PATCH_FIGURES);
+			memcpy(figures.ptrw(), record.figures, sizeof(record.figures));
+			return figures;
 		}
 	}
 	return PackedFloat32Array();

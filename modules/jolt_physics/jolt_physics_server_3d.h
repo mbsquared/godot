@@ -286,7 +286,8 @@ public:
 	// without a tail, [9] kept rigid for threading or velocity steps below 8, [10] pairs the builder could not class,
 	// [11] face patches whose contact set did not settle, [12] sweep-path calls on soft pairs, [13] Solid face pairs
 	// (rigid by design), [14] patches the listener built. space_debug_soft_patch gives the last step's figures of the
-	// first patch between the two shapes, 40 floats in solver units: [0] class (0 face, 1 line, 2 point), [1] kind,
+	// first patch between the two shapes (kept only with physics/jolt_physics_3d/debug/soft_patch_figures on; an empty
+	// array otherwise), 40 floats in solver units: [0] class (0 face, 1 line, 2 point), [1] kind,
 	// [2] force, [3] squash at the deepest point, [4] normal stiffness, [5..7] centre of pressure, [8..10] normal (body
 	// 1 to body 2), [11, 12] tilt stiffnesses, [13] spin radius, [14, 15] rolling arms, [16] area, [17, 18] the field's
 	// first moments along the tangents, [19] static and [20] sliding friction, [21] the face condition's ratio (T3),

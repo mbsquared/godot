@@ -87,6 +87,8 @@ void JoltProjectSettings::register_settings() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "physics/jolt_physics_3d/limits/max_contact_constraints", PROPERTY_HINT_RANGE, U"8,20480,or_greater"), 20480);
 	// CRUMB: the soft patches one step can solve (the compliant contact); a soft contact beyond it stays rigid and is counted
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "physics/jolt_physics_3d/limits/max_soft_contact_patches", PROPERTY_HINT_RANGE, U"0,4096,or_greater"), 256);
+	// CRUMB: keep each step's soft patch figures for space_debug_soft_patch (off: nothing is kept, nothing allocated)
+	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "physics/jolt_physics_3d/debug/soft_patch_figures"), false);
 
 	read_settings();
 
@@ -141,4 +143,5 @@ void JoltProjectSettings::read_settings() {
 	max_body_pairs = GLOBAL_GET("physics/jolt_physics_3d/limits/max_body_pairs");
 	max_contact_constraints = GLOBAL_GET("physics/jolt_physics_3d/limits/max_contact_constraints");
 	max_soft_contact_patches = GLOBAL_GET("physics/jolt_physics_3d/limits/max_soft_contact_patches");
+	soft_patch_figures = GLOBAL_GET("physics/jolt_physics_3d/debug/soft_patch_figures");
 }
