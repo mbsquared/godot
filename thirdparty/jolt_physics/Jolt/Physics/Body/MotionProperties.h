@@ -186,6 +186,12 @@ public:
 	void					SetNumPositionStepsOverride(uint inN)							{ JPH_ASSERT(inN < 256); mNumPositionStepsOverride = uint8(inN); }
 	uint					GetNumPositionStepsOverride() const								{ return mNumPositionStepsOverride; }
 
+	// CRUMB: set for a dynamic body when one of its manifolds is solved as a soft patch this step (ContactConstraintManager),
+	// read and cleared when its velocity is integrated: such a body then integrates every turn, the small ones too
+	// (Body::AddRotationStepCompliant). Soft patches are solved single threaded only, so the flag needs no atomics.
+	inline void				SetInSoftContactInternal()										{ mInSoftContact = true; }
+	inline bool				TakeInSoftContactInternal()										{ bool in = mInSoftContact; mInSoftContact = false; return in; }
+
 	////////////////////////////////////////////////////////////
 	// FUNCTIONS BELOW THIS LINE ARE FOR INTERNAL USE ONLY
 	////////////////////////////////////////////////////////////
@@ -262,6 +268,7 @@ private:
 	EAllowedDOFs			mAllowedDOFs = EAllowedDOFs::All;								///< Allowed degrees of freedom for this body
 	uint8					mNumVelocityStepsOverride = 0;									///< Used only when this body is dynamic and colliding. Override for the number of solver velocity iterations to run, 0 means use the default in PhysicsSettings::mNumVelocitySteps. The number of iterations to use is the max of all contacts and constraints in the island.
 	uint8					mNumPositionStepsOverride = 0;									///< Used only when this body is dynamic and colliding. Override for the number of solver position iterations to run, 0 means use the default in PhysicsSettings::mNumPositionSteps. The number of iterations to use is the max of all contacts and constraints in the island.
+	bool					mInSoftContact = false;											// CRUMB: see SetInSoftContactInternal
 
 	// 3rd cache line (least frequently used)
 	// 4 byte aligned (or 8 byte if running in double precision)

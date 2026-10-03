@@ -1275,6 +1275,11 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 					cp.mFrictionLambda[1] = 0.0f;
 				}
 				soft_solved = true;
+				// A dynamic body in a soft patch integrates every turn this step (MotionProperties::SetInSoftContactInternal)
+				if constexpr (Type1 == EMotionType::Dynamic)
+					inBody1.GetMotionPropertiesUnchecked()->SetInSoftContactInternal();
+				if constexpr (Type2 == EMotionType::Dynamic)
+					inBody2.GetMotionPropertiesUnchecked()->SetInSoftContactInternal();
 			}
 			else
 				++mSoftStats.mOverflow;
@@ -2428,6 +2433,10 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 	for (SoftRow &r : p.mRoll)
 		sSoftRowReset(r);
 
+	// A patch that carries its own normal (a face patch: its soft face's) is solved along it, and the constraint keeps it
+	// too, so whatever reads the constraint's normal agrees with the rows
+	if (!inPatch.mNormal.IsNearZero())
+		inPatch.mNormal.Normalized().StoreFloat3(&ioConstraint.mWorldSpaceNormal);
 	Vec3 n = ioConstraint.GetWorldSpaceNormal();
 	Vec3 t1 = inPatch.mTangent1;
 	Vec3 t2 = inPatch.mTangent2;

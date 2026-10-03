@@ -11,7 +11,7 @@ index 034f345286..4fd617ef28 100644
  	result.mEnhancedInternalEdgeRemoval = GetEnhancedInternalEdgeRemoval();
  	result.mAllowSleeping = mMotionProperties != nullptr? GetAllowSleeping() : true;
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/Body/Body.h b/thirdparty/jolt_physics/Jolt/Physics/Body/Body.h
-index 44d71eb999..dffc9d8da5 100644
+index 44d71eb999..012986ead7 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/Body/Body.h
 +++ b/thirdparty/jolt_physics/Jolt/Physics/Body/Body.h
 @@ -114,6 +114,13 @@ public:
@@ -28,7 +28,7 @@ index 44d71eb999..dffc9d8da5 100644
  	/// Get the bodies motion type.
  	inline EMotionType		GetMotionType() const											{ return mMotionType; }
  
-@@ -346,6 +353,22 @@ public:
+@@ -346,6 +353,25 @@ public:
  	inline void				AddRotationStep(Vec3Arg inAngularVelocityTimesDeltaTime);
  	inline void				SubRotationStep(Vec3Arg inAngularVelocityTimesDeltaTime);
  
@@ -36,7 +36,10 @@ index 44d71eb999..dffc9d8da5 100644
 +	// slowly keeps its rotation while its centre of mass moves with the same velocities. A body with compliant shapes reads
 +	// its contact law from its exact pose, and a small steady turn its law would answer (a moment its tilt rows only damp
 +	// until the turn shows in the pose) left out step after step lets the body drift: a soft tyre at rest crept sideways at
-+	// a steady spin about its rolling direction that its pose never showed. This applies every turn.
++	// a steady spin about its rolling direction that its pose never showed. A rigid body pressed on a soft pad reads the
++	// pad's law from its own pose the same way (a block resting or held on a pad drifted sideways at the spin it never
++	// showed), so PhysicsSystem also takes this for a dynamic body one of whose manifolds was solved as a soft patch that
++	// step (MotionProperties::SetInSoftContactInternal). This applies every turn.
 +	inline void				AddRotationStepCompliant(Vec3Arg inAngularVelocityTimesDeltaTime)
 +	{
 +		JPH_ASSERT(IsRigidBody());
@@ -51,7 +54,7 @@ index 44d71eb999..dffc9d8da5 100644
  	/// Flag if body is in the broadphase (should only be called by the BroadPhase)
  	inline void				SetInBroadPhaseInternal(bool inInBroadPhase)					{ if (inInBroadPhase) mFlags.fetch_or(uint8(EFlags::IsInBroadPhase), memory_order_relaxed); else mFlags.fetch_and(uint8(~uint8(EFlags::IsInBroadPhase)), memory_order_relaxed); }
  
-@@ -414,6 +437,7 @@ private:
+@@ -414,6 +440,7 @@ private:
  		UseManifoldReduction			= 1 << 4,											///< Set this bit to indicate that this body can use manifold reduction (if PhysicsSettings::mUseManifoldReduction is true)
  		ApplyGyroscopicForce			= 1 << 5,											///< Set this bit to indicate that the gyroscopic force should be applied to this body (aka Dzhanibekov effect, see https://en.wikipedia.org/wiki/Tennis_racket_theorem)
  		EnhancedInternalEdgeRemoval		= 1 << 6,											///< Set this bit to indicate that enhanced internal edge removal should be used for this body (see BodyCreationSettings::mEnhancedInternalEdgeRemoval)
@@ -137,11 +140,36 @@ index ebf524ba05..bd1d559f7d 100644
  	if (inBodyCreationSettings.mEnhancedInternalEdgeRemoval)
  		body->SetEnhancedInternalEdgeRemoval(true);
  	SetBodyObjectLayerInternal(*body, inBodyCreationSettings.mObjectLayer);
+diff --git a/thirdparty/jolt_physics/Jolt/Physics/Body/MotionProperties.h b/thirdparty/jolt_physics/Jolt/Physics/Body/MotionProperties.h
+index d8a485b611..7affc8176c 100644
+--- a/thirdparty/jolt_physics/Jolt/Physics/Body/MotionProperties.h
++++ b/thirdparty/jolt_physics/Jolt/Physics/Body/MotionProperties.h
+@@ -186,6 +186,12 @@ public:
+ 	void					SetNumPositionStepsOverride(uint inN)							{ JPH_ASSERT(inN < 256); mNumPositionStepsOverride = uint8(inN); }
+ 	uint					GetNumPositionStepsOverride() const								{ return mNumPositionStepsOverride; }
+ 
++	// CRUMB: set for a dynamic body when one of its manifolds is solved as a soft patch this step (ContactConstraintManager),
++	// read and cleared when its velocity is integrated: such a body then integrates every turn, the small ones too
++	// (Body::AddRotationStepCompliant). Soft patches are solved single threaded only, so the flag needs no atomics.
++	inline void				SetInSoftContactInternal()										{ mInSoftContact = true; }
++	inline bool				TakeInSoftContactInternal()										{ bool in = mInSoftContact; mInSoftContact = false; return in; }
++
+ 	////////////////////////////////////////////////////////////
+ 	// FUNCTIONS BELOW THIS LINE ARE FOR INTERNAL USE ONLY
+ 	////////////////////////////////////////////////////////////
+@@ -262,6 +268,7 @@ private:
+ 	EAllowedDOFs			mAllowedDOFs = EAllowedDOFs::All;								///< Allowed degrees of freedom for this body
+ 	uint8					mNumVelocityStepsOverride = 0;									///< Used only when this body is dynamic and colliding. Override for the number of solver velocity iterations to run, 0 means use the default in PhysicsSettings::mNumVelocitySteps. The number of iterations to use is the max of all contacts and constraints in the island.
+ 	uint8					mNumPositionStepsOverride = 0;									///< Used only when this body is dynamic and colliding. Override for the number of solver position iterations to run, 0 means use the default in PhysicsSettings::mNumPositionSteps. The number of iterations to use is the max of all contacts and constraints in the island.
++	bool					mInSoftContact = false;											// CRUMB: see SetInSoftContactInternal
+ 
+ 	// 3rd cache line (least frequently used)
+ 	// 4 byte aligned (or 8 byte if running in double precision)
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h b/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
-index 73cd684556..35124689bd 100644
+index 73cd684556..bc1e92b17d 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
 +++ b/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
-@@ -35,6 +35,126 @@ public:
+@@ -35,6 +35,127 @@ public:
  	ContactPoints			mRelativeContactPointsOn2;			///< Contact points on the surface of shape 2 relative to mBaseOffset. If there's no penetration, this will be the same as mRelativeContactPointsOn1. If there is penetration they will be different.
  };
  
@@ -209,6 +237,7 @@ index 73cd684556..35124689bd 100644
 +	uint8					mNumTilt = 0;						// Rows about in-plane axes that carry tilt stiffness
 +	uint8					mNumRoll = 0;						// Rows about in-plane axes that carry rolling resistance
 +	RVec3					mCentre;							// Where the normal, friction and spin rows act (world); the deepest point when nothing presses
++	Vec3					mNormal = Vec3::sZero();			// The patch's own normal (world, from body 1 to body 2): a face patch's soft face normal; zero: the manifold's
 +	RVec3					mDeepest;							// The deepest point of the overlap, midway between the two surfaces (world)
 +	Vec3					mTangent1 = Vec3::sZero();			// The patch's in-plane axes (world), tangent 2 = normal x tangent 1
 +	Vec3					mTangent2 = Vec3::sZero();
@@ -268,7 +297,7 @@ index 73cd684556..35124689bd 100644
  /// When a contact point is added or persisted, the callback gets a chance to override certain properties of the contact constraint.
  /// The values are filled in with their defaults by the system so the callback doesn't need to modify anything, but it can if it wants to.
  class ContactSettings
-@@ -53,6 +173,14 @@ public:
+@@ -53,6 +174,14 @@ public:
  	// on a hit the sweep path (continuous collision detection) resolves with these settings. It
  	// changes nothing the solver does.
  	bool					mReportSolved = false;
@@ -316,7 +345,7 @@ index 0a8a4a9730..adb38544f0 100644
  	inline bool					IsActive() const
  	{
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
-index acb0985483..a665c79477 100644
+index acb0985483..4b9c872b08 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
 +++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
 @@ -304,16 +304,18 @@ const ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCac
@@ -530,7 +559,7 @@ index acb0985483..a665c79477 100644
  			return false;
  		}
  
-@@ -1185,12 +1254,38 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
+@@ -1185,12 +1254,43 @@ bool ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
  			inv_i2 = Mat44::sZero();
  		}
  
@@ -555,6 +584,11 @@ index acb0985483..a665c79477 100644
 +					cp.mFrictionLambda[1] = 0.0f;
 +				}
 +				soft_solved = true;
++				// A dynamic body in a soft patch integrates every turn this step (MotionProperties::SetInSoftContactInternal)
++				if constexpr (Type1 == EMotionType::Dynamic)
++					inBody1.GetMotionPropertiesUnchecked()->SetInSoftContactInternal();
++				if constexpr (Type2 == EMotionType::Dynamic)
++					inBody2.GetMotionPropertiesUnchecked()->SetInSoftContactInternal();
 +			}
 +			else
 +				++mSoftStats.mOverflow;
@@ -571,7 +605,7 @@ index acb0985483..a665c79477 100644
  		{
  			// Convert to world space and set positions
  			WorldContactPoint &wcp = constraint.mContactPoints[i];
-@@ -1369,6 +1464,7 @@ void ContactConstraintManager::OnCCDContactAdded(ContactAllocator &ioContactAllo
+@@ -1369,6 +1469,7 @@ void ContactConstraintManager::OnCCDContactAdded(ContactAllocator &ioContactAllo
  	outSettings.mCombinedFriction = mCombineFriction(inBody1, inManifold.mSubShapeID1, inBody2, inManifold.mSubShapeID2);
  	outSettings.mCombinedRestitution = mCombineRestitution(inBody1, inManifold.mSubShapeID1, inBody2, inManifold.mSubShapeID2);
  	outSettings.mIsSensor = false; // For now, no sensors are supported during CCD
@@ -579,7 +613,7 @@ index acb0985483..a665c79477 100644
  
  	// The remainder of this function only deals with calling contact callbacks, if there's no contact callback we also don't need to do this work
  	if (mContactListener != nullptr)
-@@ -1554,6 +1650,17 @@ void ContactConstraintManager::WarmStartVelocityConstraints(const uint32 *inCons
+@@ -1554,6 +1655,17 @@ void ContactConstraintManager::WarmStartVelocityConstraints(const uint32 *inCons
  		EMotionType motion_type2 = body2.GetMotionType();
  		MotionProperties *motion_properties2 = body2.GetMotionPropertiesUnchecked();
  
@@ -597,7 +631,7 @@ index acb0985483..a665c79477 100644
  		// Dispatch to the correct templated form
  		// Note: Warm starting doesn't differentiate between kinematic/static bodies so we handle both as static bodies
  		if (motion_type1 == EMotionType::Dynamic)
-@@ -1657,6 +1764,13 @@ bool ContactConstraintManager::SolveVelocityConstraints(const uint32 *inConstrai
+@@ -1657,6 +1769,13 @@ bool ContactConstraintManager::SolveVelocityConstraints(const uint32 *inConstrai
  		EMotionType motion_type2 = body2.GetMotionType();
  		MotionProperties *motion_properties2 = body2.GetMotionPropertiesUnchecked();
  
@@ -611,7 +645,7 @@ index acb0985483..a665c79477 100644
  		// Dispatch to the correct templated form
  		switch (motion_type1)
  		{
-@@ -1707,6 +1821,13 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintId
+@@ -1707,6 +1826,13 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintId
  	{
  		const ContactConstraint &constraint = mConstraints[*constraint_idx];
  
@@ -625,7 +659,7 @@ index acb0985483..a665c79477 100644
  		for (const WorldContactPoint &wcp : constraint.mContactPoints)
  		{
  			wcp.mContactPoint->mNonPenetrationLambda = wcp.mNonPenetrationConstraint.GetTotalLambda();
-@@ -1792,6 +1913,14 @@ bool ContactConstraintManager::SolvePositionConstraints(const uint32 *inConstrai
+@@ -1792,6 +1918,14 @@ bool ContactConstraintManager::SolvePositionConstraints(const uint32 *inConstrai
  	{
  		ContactConstraint &constraint = mConstraints[*constraint_idx];
  
@@ -640,7 +674,7 @@ index acb0985483..a665c79477 100644
  		// Fetch bodies
  		Body &body1 = *constraint.mBody1;
  		Body &body2 = *constraint.mBody2;
-@@ -1833,10 +1962,18 @@ void ContactConstraintManager::RecycleConstraintBuffer()
+@@ -1833,10 +1967,18 @@ void ContactConstraintManager::RecycleConstraintBuffer()
  {
  	// Reset constraint array
  	mNumConstraints = 0;
@@ -659,7 +693,7 @@ index acb0985483..a665c79477 100644
  	// Free constraints buffer
  	mUpdateContext->mTempAllocator->Free(mConstraints, mMaxConstraints * sizeof(ContactConstraint));
  	mConstraints = nullptr;
-@@ -1865,4 +2002,1477 @@ bool ContactConstraintManager::RestoreState(StateRecorder &inStream, const State
+@@ -1865,4 +2007,1481 @@ bool ContactConstraintManager::RestoreState(StateRecorder &inStream, const State
  	return success;
  }
  
@@ -1089,6 +1123,10 @@ index acb0985483..a665c79477 100644
 +	for (SoftRow &r : p.mRoll)
 +		sSoftRowReset(r);
 +
++	// A patch that carries its own normal (a face patch: its soft face's) is solved along it, and the constraint keeps it
++	// too, so whatever reads the constraint's normal agrees with the rows
++	if (!inPatch.mNormal.IsNearZero())
++		inPatch.mNormal.Normalized().StoreFloat3(&ioConstraint.mWorldSpaceNormal);
 +	Vec3 n = ioConstraint.GetWorldSpaceNormal();
 +	Vec3 t1 = inPatch.mTangent1;
 +	Vec3 t2 = inPatch.mTangent2;
@@ -2382,7 +2420,7 @@ index 36f0d61401..499515adda 100644
  	/// Assign two bodies to a split. Returns the split index.
  	uint					AssignSplit(const Body *inBody1, const Body *inBody2);
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
-index 59e030325c..0f55de2ced 100644
+index 59e030325c..e0bc1fb005 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
 +++ b/thirdparty/jolt_physics/Jolt/Physics/PhysicsSystem.cpp
 @@ -1292,9 +1292,9 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
@@ -2423,21 +2461,23 @@ index 59e030325c..0f55de2ced 100644
  			// Store the number of position steps for later
  			mIslandBuilder.SetNumPositionSteps(island_idx, steps_calculator.GetNumPositionSteps());
  
-@@ -1549,7 +1558,12 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext,
+@@ -1549,7 +1558,14 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext,
  			// time step) resulting in a lot of stolen time and the body appearing to be frozen in an unnatural pose (like it is glued at an angle to the surface). (2) obviously has some negative side effects
  			// too as simulating the rotation first may cause it to tunnel through a small object that the linear cast might have otherwise detected. In any case a linear cast is not good for detecting
  			// tunneling due to angular rotation, so we don't care about that too much (you'd need a full cast to take angular effects into account).
 -			body.AddRotationStep(body.GetAngularVelocity() * delta_time);
-+			// CRUMB: a body with compliant shapes integrates every turn its velocity gives, the small ones too (see
-+			// Body::AddRotationStepCompliant)
-+			if (body.HasCompliantShapes())
++			// CRUMB: a body with compliant shapes, and a dynamic body one of whose manifolds was solved as a soft patch this
++			// step (a rigid part on a soft pad), integrates every turn its velocity gives, the small ones too (see
++			// Body::AddRotationStepCompliant). The flag is read and cleared here every step.
++			const bool soft_turn = mp->TakeInSoftContactInternal();
++			if (body.HasCompliantShapes() || soft_turn)
 +				body.AddRotationStepCompliant(body.GetAngularVelocity() * delta_time);
 +			else
 +				body.AddRotationStep(body.GetAngularVelocity() * delta_time);
  
  			// Get delta position
  			Vec3 delta_pos = body.GetLinearVelocity() * delta_time;
-@@ -1752,6 +1766,14 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
+@@ -1752,6 +1768,14 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
  
  				// Check if this is a possible earlier hit than the one before
  				float fraction = inResult.mFraction;
@@ -2452,7 +2492,7 @@ index 59e030325c..0f55de2ced 100644
  				if (fraction < mCCDBody.mFractionPlusSlop)
  				{
  					// Normalize normal
-@@ -2477,9 +2499,11 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
+@@ -2477,9 +2501,11 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
  			mIslandBuilder.GetContactsInIsland(island_idx, contacts_begin, contacts_end);
  
  			// If this island is a large island, it will be picked up as a batch and we don't need to do anything here

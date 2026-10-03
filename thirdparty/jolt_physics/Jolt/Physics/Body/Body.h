@@ -357,7 +357,10 @@ public:
 	// slowly keeps its rotation while its centre of mass moves with the same velocities. A body with compliant shapes reads
 	// its contact law from its exact pose, and a small steady turn its law would answer (a moment its tilt rows only damp
 	// until the turn shows in the pose) left out step after step lets the body drift: a soft tyre at rest crept sideways at
-	// a steady spin about its rolling direction that its pose never showed. This applies every turn.
+	// a steady spin about its rolling direction that its pose never showed. A rigid body pressed on a soft pad reads the
+	// pad's law from its own pose the same way (a block resting or held on a pad drifted sideways at the spin it never
+	// showed), so PhysicsSystem also takes this for a dynamic body one of whose manifolds was solved as a soft patch that
+	// step (MotionProperties::SetInSoftContactInternal). This applies every turn.
 	inline void				AddRotationStepCompliant(Vec3Arg inAngularVelocityTimesDeltaTime)
 	{
 		JPH_ASSERT(IsRigidBody());

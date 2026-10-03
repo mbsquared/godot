@@ -1558,9 +1558,11 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 			// time step) resulting in a lot of stolen time and the body appearing to be frozen in an unnatural pose (like it is glued at an angle to the surface). (2) obviously has some negative side effects
 			// too as simulating the rotation first may cause it to tunnel through a small object that the linear cast might have otherwise detected. In any case a linear cast is not good for detecting
 			// tunneling due to angular rotation, so we don't care about that too much (you'd need a full cast to take angular effects into account).
-			// CRUMB: a body with compliant shapes integrates every turn its velocity gives, the small ones too (see
-			// Body::AddRotationStepCompliant)
-			if (body.HasCompliantShapes())
+			// CRUMB: a body with compliant shapes, and a dynamic body one of whose manifolds was solved as a soft patch this
+			// step (a rigid part on a soft pad), integrates every turn its velocity gives, the small ones too (see
+			// Body::AddRotationStepCompliant). The flag is read and cleared here every step.
+			const bool soft_turn = mp->TakeInSoftContactInternal();
+			if (body.HasCompliantShapes() || soft_turn)
 				body.AddRotationStepCompliant(body.GetAngularVelocity() * delta_time);
 			else
 				body.AddRotationStep(body.GetAngularVelocity() * delta_time);

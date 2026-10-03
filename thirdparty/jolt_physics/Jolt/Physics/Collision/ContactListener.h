@@ -99,6 +99,7 @@ struct SoftContactPatch
 	uint8					mNumTilt = 0;						// Rows about in-plane axes that carry tilt stiffness
 	uint8					mNumRoll = 0;						// Rows about in-plane axes that carry rolling resistance
 	RVec3					mCentre;							// Where the normal, friction and spin rows act (world); the deepest point when nothing presses
+	Vec3					mNormal = Vec3::sZero();			// The patch's own normal (world, from body 1 to body 2): a face patch's soft face normal; zero: the manifold's
 	RVec3					mDeepest;							// The deepest point of the overlap, midway between the two surfaces (world)
 	Vec3					mTangent1 = Vec3::sZero();			// The patch's in-plane axes (world), tangent 2 = normal x tangent 1
 	Vec3					mTangent2 = Vec3::sZero();
