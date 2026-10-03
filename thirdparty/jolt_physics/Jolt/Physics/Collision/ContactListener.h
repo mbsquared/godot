@@ -77,6 +77,16 @@ struct SoftContactTail
 	Float3					mAnchorSlip;
 	float					mAnchorTwist;
 
+	// A face patch's held-slide memory (the face law v3): the overlap's gradient in the patch frame that the contact set grew
+	// at (new area weighted by its share), and the contact's area then; mHeldArea 0: none
+	float					mHeldGradient[2];
+	float					mHeldArea;
+
+	// The last step's face patch normal (world, from body 1 to body 2; zero: the last patch was no face patch): the builder
+	// keeps to it when the manifold's normal turns more than 45 deg in one step and reads at least twice the overlap
+	// found along this one (a penetration search that failed)
+	float					mFaceNormal[3];
+
 	enum EFlags : uint32
 	{
 		OnsetPending		= 1 << 0,							// The episode's first touch is still to be decided (set when the manifold is new)
@@ -130,6 +140,8 @@ struct SoftContactPatch
 	uint8					mGridLong = 0;
 	uint8					mGridShort = 0;
 	uint8					mGridKind = SoftContactTail::GridNone;	// Which face law wrote mActiveSet
+	float					mHeldGradient[2] = { 0.0f, 0.0f };	// A face patch's held-slide memory, carried to the next step (SoftContactTail)
+	float					mHeldArea = 0.0f;
 
 	// The first-touch law: the patch's own pressed law sampled at ascending squashes (mNumLawPoints of them; at least 2 to be
 	// read), between two samples the power law through them, below the first and above the last the end segments' laws.

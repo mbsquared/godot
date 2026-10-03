@@ -166,10 +166,10 @@ index d8a485b611..7affc8176c 100644
  	// 3rd cache line (least frequently used)
  	// 4 byte aligned (or 8 byte if running in double precision)
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h b/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
-index 73cd684556..bc1e92b17d 100644
+index 73cd684556..20733b7bb2 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
 +++ b/thirdparty/jolt_physics/Jolt/Physics/Collision/ContactListener.h
-@@ -35,6 +35,127 @@ public:
+@@ -35,6 +35,139 @@ public:
  	ContactPoints			mRelativeContactPointsOn2;			///< Contact points on the surface of shape 2 relative to mBaseOffset. If there's no penetration, this will be the same as mRelativeContactPointsOn1. If there is penetration they will be different.
  };
  
@@ -214,6 +214,16 @@ index 73cd684556..bc1e92b17d 100644
 +	float					mAnchorRotation[4];
 +	Float3					mAnchorSlip;
 +	float					mAnchorTwist;
++
++	// A face patch's held-slide memory (the face law v3): the overlap's gradient in the patch frame that the contact set grew
++	// at (new area weighted by its share), and the contact's area then; mHeldArea 0: none
++	float					mHeldGradient[2];
++	float					mHeldArea;
++
++	// The last step's face patch normal (world, from body 1 to body 2; zero: the last patch was no face patch): the builder
++	// keeps to it when the manifold's normal turns more than 45 deg in one step and reads at least twice the overlap
++	// found along this one (a penetration search that failed)
++	float					mFaceNormal[3];
 +
 +	enum EFlags : uint32
 +	{
@@ -268,6 +278,8 @@ index 73cd684556..bc1e92b17d 100644
 +	uint8					mGridLong = 0;
 +	uint8					mGridShort = 0;
 +	uint8					mGridKind = SoftContactTail::GridNone;	// Which face law wrote mActiveSet
++	float					mHeldGradient[2] = { 0.0f, 0.0f };	// A face patch's held-slide memory, carried to the next step (SoftContactTail)
++	float					mHeldArea = 0.0f;
 +
 +	// The first-touch law: the patch's own pressed law sampled at ascending squashes (mNumLawPoints of them; at least 2 to be
 +	// read), between two samples the power law through them, below the first and above the last the end segments' laws.
@@ -297,7 +309,7 @@ index 73cd684556..bc1e92b17d 100644
  /// When a contact point is added or persisted, the callback gets a chance to override certain properties of the contact constraint.
  /// The values are filled in with their defaults by the system so the callback doesn't need to modify anything, but it can if it wants to.
  class ContactSettings
-@@ -53,6 +174,14 @@ public:
+@@ -53,6 +186,14 @@ public:
  	// on a hit the sweep path (continuous collision detection) resolves with these settings. It
  	// changes nothing the solver does.
  	bool					mReportSolved = false;
@@ -345,7 +357,7 @@ index 0a8a4a9730..adb38544f0 100644
  	inline bool					IsActive() const
  	{
 diff --git a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
-index acb0985483..4b9c872b08 100644
+index acb0985483..e902adebc0 100644
 --- a/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
 +++ b/thirdparty/jolt_physics/Jolt/Physics/Constraints/ContactConstraintManager.cpp
 @@ -304,16 +304,18 @@ const ContactConstraintManager::MKeyValue *ContactConstraintManager::ManifoldCac
@@ -693,7 +705,7 @@ index acb0985483..4b9c872b08 100644
  	// Free constraints buffer
  	mUpdateContext->mTempAllocator->Free(mConstraints, mMaxConstraints * sizeof(ContactConstraint));
  	mConstraints = nullptr;
-@@ -1865,4 +2007,1481 @@ bool ContactConstraintManager::RestoreState(StateRecorder &inStream, const State
+@@ -1865,4 +2007,1489 @@ bool ContactConstraintManager::RestoreState(StateRecorder &inStream, const State
  	return success;
  }
  
@@ -1480,6 +1492,14 @@ index acb0985483..4b9c872b08 100644
 +	ioTail.mGridLong = inPatch.mGridLong;
 +	ioTail.mGridShort = inPatch.mGridShort;
 +	ioTail.mGridKind = inPatch.mGridKind;
++	// and its held-slide memory (none unless a face patch wrote one)
++	ioTail.mHeldGradient[0] = inPatch.mHeldGradient[0];
++	ioTail.mHeldGradient[1] = inPatch.mHeldGradient[1];
++	ioTail.mHeldArea = inPatch.mHeldArea;
++	// and a face patch's own normal (zero for a Line or a Point, whose normal is the manifold's)
++	ioTail.mFaceNormal[0] = inPatch.mNormal.GetX();
++	ioTail.mFaceNormal[1] = inPatch.mNormal.GetY();
++	ioTail.mFaceNormal[2] = inPatch.mNormal.GetZ();
 +}
 +
 +// The core rows' total impulse that presses (each clamped at zero)

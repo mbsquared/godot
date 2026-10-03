@@ -2790,6 +2790,14 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 	ioTail.mGridLong = inPatch.mGridLong;
 	ioTail.mGridShort = inPatch.mGridShort;
 	ioTail.mGridKind = inPatch.mGridKind;
+	// and its held-slide memory (none unless a face patch wrote one)
+	ioTail.mHeldGradient[0] = inPatch.mHeldGradient[0];
+	ioTail.mHeldGradient[1] = inPatch.mHeldGradient[1];
+	ioTail.mHeldArea = inPatch.mHeldArea;
+	// and a face patch's own normal (zero for a Line or a Point, whose normal is the manifold's)
+	ioTail.mFaceNormal[0] = inPatch.mNormal.GetX();
+	ioTail.mFaceNormal[1] = inPatch.mNormal.GetY();
+	ioTail.mFaceNormal[2] = inPatch.mNormal.GetZ();
 }
 
 // The core rows' total impulse that presses (each clamped at zero)
