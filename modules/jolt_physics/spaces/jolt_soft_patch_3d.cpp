@@ -2972,6 +2972,32 @@ void supporting_face(const JPH::Body &p_body, const JPH::SubShapeID &p_id, JPH::
 	}
 }
 
+// A supporting face's plane normal (Newell's, from its vertices), turned to the side of p_toward; zero for a face with
+// fewer than 3 vertices, a degenerate one, or one more than 60 deg from p_toward (then it is not the face p_toward found)
+JPH::Vec3 face_normal(const SupportFace &p_face, const JPH::Vec3 &p_toward) {
+	if (p_face.n < 3) {
+		return JPH::Vec3::sZero();
+	}
+	double nx = 0.0, ny = 0.0, nz = 0.0;
+	for (int k = 0; k < p_face.n; ++k) {
+		const JPH::Vec3 &a = p_face.v[k];
+		const JPH::Vec3 &b = p_face.v[(k + 1) % p_face.n];
+		nx += (double(a.GetY()) - double(b.GetY())) * (double(a.GetZ()) + double(b.GetZ()));
+		ny += (double(a.GetZ()) - double(b.GetZ())) * (double(a.GetX()) + double(b.GetX()));
+		nz += (double(a.GetX()) - double(b.GetX())) * (double(a.GetY()) + double(b.GetY()));
+	}
+	const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+	if (!(len > 0.0)) {
+		return JPH::Vec3::sZero();
+	}
+	JPH::Vec3 fn(float(nx / len), float(ny / len), float(nz / len));
+	const float c = fn.Dot(p_toward);
+	if (std::abs(c) < 0.5f) {
+		return JPH::Vec3::sZero();
+	}
+	return c < 0.0f ? -fn : fn;
+}
+
 // The height z(x, y) of a planar face along the normal, in the patch frame (origin o, axes t1, t2, n)
 struct HeightPlane {
 	double z0 = 0.0, gx = 0.0, gy = 0.0;
@@ -3203,7 +3229,7 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	const JoltSoftSurface3D *partner = soft_is_1 ? s2 : s1;
 	const bool two_layers = partner != nullptr && soft.kind == JoltSoftSurface3D::KIND_LAYER && partner->kind == JoltSoftSurface3D::KIND_LAYER;
 
-	const JPH::Vec3 n = manifold.mWorldSpaceNormal;
+	JPH::Vec3 n = manifold.mWorldSpaceNormal;
 	const JPH::RVec3 base = manifold.mBaseOffset;
 
 	// The two supporting faces along the normal: body 1's faces +n, body 2's faces -n
@@ -3256,6 +3282,25 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	if (cls < 0) {
 		r_result.outcome = JoltSoftBuildResult::UNCLASSED;
 		return false;
+	}
+	// A face patch is built and solved along its soft face's own normal (Stage 1c-b gates). The manifold's normal comes from
+	// the penetration search, which on a squash of a few tenths of a micrometre between two boxes can sit tens of degrees
+	// off the faces for a step (PS6's island at 1 kHz: 28 deg), and the law, its frame and every row would follow it: the
+	// pad read foreshortened, its force pushing sideways. The faces are picked again along the face normal; if that leaves
+	// either side without a face, the manifold's normal stays.
+	if (cls == 0) {
+		const JPH::Vec3 fn = face_normal(soft_is_1 ? face1 : face2, n);
+		if (fn != JPH::Vec3::sZero()) {
+			SupportFace again1, again2;
+			supporting_face(body1, manifold.mSubShapeID1, fn, base, again1);
+			supporting_face(body2, manifold.mSubShapeID2, -fn, base, again2);
+			if (again1.n >= 3 && again2.n >= 3) {
+				face1 = again1;
+				face2 = again2;
+				n = fn;
+				r_patch.mNormal = fn;
+			}
+		}
 	}
 	r_patch.mClass = uint8_t(cls);
 
