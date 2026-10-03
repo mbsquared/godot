@@ -724,6 +724,22 @@ bool face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, dou
 // edge, the Coulomb face is p = (1 - Phi) p_lub + Phi p_ns with Phi the FE's own friction share along the contact's
 // boundary, then the FE's own reshaping at mu 0.3, 0.6 and 0.9. The FE tables are the face table header's
 // (soft_layer_table/jolt_soft_face_table.gen.h); its constants and stations must be this code's (checked below).
+// The face law v3 (Stage 1c-b fix round; the desk reference's section 6c, its inset tables from
+// stage1cb/fx/gen_inset_tables.py) is v2 with:
+//   1. an indenter edge by its margin m (the free layer between the partner's edge and the layer's own edge, read at
+//      the edge's point nearest the cell, at most FREE_BOX depths): its multipliers and friction share from the inset
+//      tables (FE by margin: 0 is the free face, FREE_BOX the punch), its choke times chi = 1 - exp(-m / INSET_LAMBDA);
+//   2. a cell near both a free face and an indenter edge of small margin takes them as one free face (a soft choice by
+//      distance, weighted by the indenter's freeness 1 - chi), so a part's edge crossing the pad's reads continuously;
+//   3. the grid turned to the circular mean (modulo 90 deg) of the contactable region's near-longest edges, the longest
+//      edge when they disagree, so a part turning on a pad its own size turns the grid continuously;
+//   4. embedded edges: a cell keeps its centre's classification but stands for the area the faces really cover (its own
+//      covered part plus its axis neighbours' whose centres fall outside), q = 0 where each axis of a cell meets the
+//      layer's edge, an indenter edge where the partner's edge crosses the axis between two cells; on an axis-aligned
+//      rectangle every cell is whole and the discretisation is v2's;
+//   5. at least 12 cells per axis (a round contact's edge on the embedded grid);
+//   6. the held slide's memory: the gradient remembered as the contact set grew (area weighted, carried in the tail) in
+//      place of the current gradient, so a face pressed flat and then tilted makes no slide.
 
 namespace ftab = jolt_soft_face_table;
 
@@ -738,7 +754,7 @@ constexpr double F2_KS = 0.3; // the held slide: u_s = KS |g| s (s / h)^(KP - 1)
 constexpr double F2_KP = 1.25;
 constexpr double F2_BOX = 4.0; // the free layer kept beyond the contactable region, in depths
 constexpr double F2_CELL_H = 0.35; // inner cells at most this many depths across where the count allows
-constexpr int F2_N_MIN = 8; // inner cells per axis, at least
+constexpr int F2_N_MIN = 12; // inner cells per axis, at least (v3: the edge of a round contact needs them)
 constexpr int F2_N_MAX = 32; // and at most (graded from CELL_H depths at both ends beyond it)
 constexpr int F2_N_OUT_MAX = 6; // outer cells each side, at most
 constexpr double F2_OUT_RATIO = 1.5; // their growth
@@ -753,6 +769,12 @@ constexpr double F2_EDGE_TOL = 1e-3;
 constexpr int F2_NUM_E = 21;
 constexpr double F2_STATIONS[F2_NUM_E] = { 0.0, 0.0125, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0 };
 constexpr int F2_TAIL_WORDS = F2_MAX_CELLS / 32; // one field's contact set in the tail
+constexpr double F3_SOFTMIN = 0.05; // the soft choice between a free face and an indenter edge, depths
+constexpr double F3_ALIGN_EPS = 0.1; // an edge's weight in the grid's turn: L exp(-(Lmax - L) / (EPS Lmax))
+constexpr double F3_ALIGN_AGREE = 0.5; // the weighted mean's length that makes it the turn (else the longest edge)
+constexpr double F3_GHOST_MIN = 0.05; // a drain at least this fraction of the cell from its centre
+constexpr double F3_IND_SPAN = 0.02; // an indenter edge at least this fraction of the centres' span from either centre
+constexpr double F3_INSET_LAMBDA = 0.75; // the choke's growth with the margin (the inset tables were made with it)
 
 constexpr bool f2_stations_match() {
 	for (int i = 0; i < F2_NUM_E; ++i) {
@@ -763,7 +785,8 @@ constexpr bool f2_stations_match() {
 	return true;
 }
 
-static_assert(ftab::FACE_VERSION == 1, "The module reads version 1 of the face table (DESK_A.md 6).");
+static_assert(ftab::FACE_VERSION == 2, "The module reads version 2 of the face table (the inset tables, stage1cb/fx/make_face_header_v2.py).");
+static_assert(ftab::INSET_LAMBDA == float(F3_INSET_LAMBDA) && ftab::NUM_M >= 2, "The face table's inset tables were made for another choke growth.");
 static_assert(ftab::A_HELD == float(F2_A_HELD) && ftab::A_FREE == float(F2_A_FREE), "The face table was made for other film coefficients.");
 static_assert(ftab::ALPHA_LUB == float(F2_ALPHA_LUB) && ftab::ALPHA_NS == float(F2_ALPHA_NS), "The face table was made for other local terms.");
 static_assert(ftab::GAMMA_LUB == float(F2_GAMMA_LUB) && ftab::GAMMA_NS == float(F2_GAMMA_NS), "The face table was made for another free-region compliance.");
@@ -1012,6 +1035,8 @@ struct F2Law {
 	double rot = 0.0; // the grid's axes are the caller's turned by rot
 	int passes = 0;
 	bool settled = true;
+	double A_act = 0.0; // the no-slip contact's area (the areas its cells stand for)
+	double held_out[3] = { 0.0, 0.0, 0.0 }; // the held slide's memory after this evaluation: gradient x, y (the caller's frame), area
 	F2Grid grid;
 	double X[F2_MAX_CELLS], Y[F2_MAX_CELLS], DX[F2_MAX_CELLS], DY[F2_MAX_CELLS]; // in the grid's frame
 	F2Field field[2]; // 0 lub, 1 ns
@@ -1023,6 +1048,8 @@ struct F2Tail {
 	int nx = 0;
 	int ny = 0;
 	bool has[2] = { false, false };
+	bool has_held = false; // the held slide's memory (rule 6): gradient x, y in the caller's frame, and the area
+	double held[3] = { 0.0, 0.0, 0.0 };
 };
 
 // The working arrays of one evaluation (the grid's cells, the edge distances, the system)
@@ -1033,7 +1060,12 @@ struct F2Work {
 	double d[F2_MAX_CELLS];
 	double hx[F2_MAX_CELLS], hy[F2_MAX_CELLS];
 	double e[2][F2_MAX_CELLS], ext[2][F2_MAX_CELLS], anx[2][F2_MAX_CELLS], any[2][F2_MAX_CELLS]; // [0] free face, [1] indenter edge
-	double stair_ind[F2_MAX_CELLS], stair_free[F2_MAX_CELLS];
+	double px[F2_MAX_CELLS], py[F2_MAX_CELLS]; // the nearest indenter edge's nearest point
+	double marg[F2_MAX_CELLS], chi[F2_MAX_CELLS]; // that edge's margin (depths, at most FREE_BOX) and the choke's share
+	double stair_ind[F2_MAX_CELLS];
+	double Ad[F2_MAX_CELLS], Ac[F2_MAX_CELLS]; // the areas a cell stands for: in the layer's face, under the partner
+	bool recv_d[F2_MAX_CELLS], recv_c[F2_MAX_CELLS]; // a cell standing for area up to the face's edge, the partner's
+	double dS[F2_MAX_CELLS][4], dP[F2_MAX_CELLS][4]; // where each axis (-x, +x, -y, +y) meets the face's edge, the partner's
 	double kap[F2_MAX_CELLS];
 	double diag[F2_MAX_CELLS], off_f[F2_MAX_CELLS], off_s[F2_MAX_CELLS];
 	double band[F2_MAX_CELLS * F2_MAX_BAND];
@@ -1054,8 +1086,10 @@ void f2_assemble_matrix(const F2Law &p_law, F2Work &w, const bool *p_active, int
 	const double r_choke = F2_CHOKE * h / kb;
 	for (int k = 0; k < g.n; ++k) {
 		w.kap[k] = (p_active[k] && p_kind == 1) ? kb : kf;
-		w.diag[k] = w.dom[k] ? w.area[k] / w.kq : 1.0;
-		w.diag[k] += (w.dom[k] && !p_active[k]) ? w.area[k] * h / (gam * w.E) : 0.0;
+		w.diag[k] = w.dom[k] ? w.Ad[k] / w.kq : 1.0;
+		// the free part of a cell's area carries the free region's compliance
+		const double free_area = p_active[k] ? MAX(w.Ad[k] - w.Ac[k], 0.0) : w.Ad[k];
+		w.diag[k] += w.dom[k] ? free_area * h / (gam * w.E) : 0.0;
 		w.off_f[k] = 0.0;
 		w.off_s[k] = 0.0;
 	}
@@ -1070,12 +1104,23 @@ void f2_assemble_matrix(const F2Law &p_law, F2Work &w, const bool *p_active, int
 					continue;
 				}
 				const bool a_ind = p_active[a] && !w.cont[b];
-				const bool ind = a_ind || (p_active[b] && !w.cont[a]);
-				const double rc = ind ? r_choke * (a_ind ? w.stair_ind[a] : w.stair_ind[b]) : 0.0;
+				const bool b_ind = !a_ind && p_active[b] && !w.cont[a];
 				const double la = axis == 0 ? p_law.DX[a] : p_law.DY[a];
 				const double lb = axis == 0 ? p_law.DX[b] : p_law.DY[b];
 				const double length = axis == 0 ? p_law.DY[a] : p_law.DX[a];
-				const double cf = length / (0.5 * la / w.kap[a] + 0.5 * lb / w.kap[b] + rc);
+				const double span = 0.5 * la + 0.5 * lb;
+				double res;
+				if (a_ind) {
+					// the partner's edge where it crosses the axis from the pressed cell, its choke there
+					const double th = MIN(MAX(w.dP[a][axis == 0 ? 1 : 3], F3_IND_SPAN * span), (1.0 - F3_IND_SPAN) * span);
+					res = th / w.kap[a] + (span - th) / w.kap[b] + r_choke * w.stair_ind[a];
+				} else if (b_ind) {
+					const double th = MIN(MAX(w.dP[b][axis == 0 ? 0 : 2], F3_IND_SPAN * span), (1.0 - F3_IND_SPAN) * span);
+					res = th / w.kap[b] + (span - th) / w.kap[a] + r_choke * w.stair_ind[b];
+				} else {
+					res = 0.5 * la / w.kap[a] + 0.5 * lb / w.kap[b];
+				}
+				const double cf = length / res;
 				if (b == a + 1 && (g.y_fast ? axis == 1 : axis == 0)) {
 					w.off_f[a] = -cf;
 				} else {
@@ -1086,25 +1131,27 @@ void f2_assemble_matrix(const F2Law &p_law, F2Work &w, const bool *p_active, int
 			}
 		}
 	}
-	// q = 0 half a cell beyond the domain's edge, a staircase of such faces draining as the free edge it stands for
+	// q = 0 where each axis of a cell meets the layer's edge (at the grid's end, at most half a cell out)
 	for (int k = 0; k < g.n; ++k) {
 		if (!w.dom[k]) {
 			continue;
 		}
 		const int i = g.ix(k), j = g.jy(k);
-		const double cgx = p_law.DY[k] / (0.5 * p_law.DX[k] / w.kap[k]) / w.stair_free[k];
-		const double cgy = p_law.DX[k] / (0.5 * p_law.DY[k] / w.kap[k]) / w.stair_free[k];
-		if (i == 0 || !w.dom[g.k(i - 1, j)]) {
-			w.diag[k] += cgx;
-		}
-		if (i == g.nx - 1 || !w.dom[g.k(i + 1, j)]) {
-			w.diag[k] += cgx;
-		}
-		if (j == 0 || !w.dom[g.k(i, j - 1)]) {
-			w.diag[k] += cgy;
-		}
-		if (j == g.ny - 1 || !w.dom[g.k(i, j + 1)]) {
-			w.diag[k] += cgy;
+		for (int side = 0; side < 4; ++side) {
+			const int ni = side == 0 ? i - 1 : (side == 1 ? i + 1 : i);
+			const int nj = side == 2 ? j - 1 : (side == 3 ? j + 1 : j);
+			const bool inside = ni >= 0 && ni < g.nx && nj >= 0 && nj < g.ny;
+			if (inside && w.dom[g.k(ni, nj)]) {
+				continue;
+			}
+			const double la = side < 2 ? p_law.DX[k] : p_law.DY[k];
+			const double length = side < 2 ? p_law.DY[k] : p_law.DX[k];
+			double dist = w.dS[k][side];
+			if (!inside) {
+				dist = MIN(dist, 0.5 * la);
+			}
+			dist = MAX(dist, F3_GHOST_MIN * la);
+			w.diag[k] += length * w.kap[k] / dist;
 		}
 	}
 }
@@ -1113,7 +1160,7 @@ void f2_assemble_matrix(const F2Law &p_law, F2Work &w, const bool *p_active, int
 void f2_assemble_rhs(const F2Law &p_law, F2Work &w, const bool *p_active, bool p_held) {
 	const F2Grid &g = p_law.grid;
 	for (int k = 0; k < g.n; ++k) {
-		w.rhs[k] = p_active[k] ? w.d[k] * w.area[k] : 0.0;
+		w.rhs[k] = p_active[k] ? w.d[k] * w.Ac[k] : 0.0;
 	}
 	if (!p_held) {
 		return;
@@ -1261,9 +1308,9 @@ bool f2_solve_field(F2Law &r_law, F2Work &w, int p_kind, const F2Tail *p_tail) {
 	// The field is linear in the interference for a held set: w = 1, X and Y (no held slide), combined about the centre
 	for (int k = 0; k < g.n; ++k) {
 		const bool a = f.active[k];
-		w.rhs1[k] = a ? w.area[k] : 0.0;
-		w.rhsx[k] = a ? r_law.X[k] * w.area[k] : 0.0;
-		w.rhsy[k] = a ? r_law.Y[k] * w.area[k] : 0.0;
+		w.rhs1[k] = a ? w.Ac[k] : 0.0;
+		w.rhsx[k] = a ? r_law.X[k] * w.Ac[k] : 0.0;
+		w.rhsy[k] = a ? r_law.Y[k] * w.Ac[k] : 0.0;
 	}
 	f2_back_solve(g, w, w.rhs1, f.t1);
 	f2_back_solve(g, w, w.rhsx, f.tx);
@@ -1496,6 +1543,151 @@ double f2_phi(int p_edge, double p_size, double p_mu, double p_kg, double p_wps,
 	return r;
 }
 
+// The cell and coordinate of p_x on a linear axis (clamped to it)
+void f3_lin_cell(const float *p_axis, int p_n, double p_x, int &r_j, double &r_u) {
+	const double x = MIN(MAX(p_x, double(p_axis[0])), double(p_axis[p_n - 1]));
+	int count = 0;
+	for (int i = 0; i < p_n; ++i) {
+		if (double(p_axis[i]) <= x) {
+			++count;
+		}
+	}
+	const int j = MIN(MAX(count - 1, 0), p_n - 2);
+	r_j = j;
+	r_u = MIN(MAX((x - double(p_axis[j])) / (double(p_axis[j + 1]) - double(p_axis[j])), 0.0), 1.0);
+}
+
+// An indenter edge's cell-averaged multiplier at margin p_m (depths): the inset tables, linear in ln(size) on the S nodes
+// and linear in the margin, the geometries weighted as f2_multiplier
+double f3_inset_multiplier(int p_kind, double p_size, double p_m, double p_e0, double p_e1, double p_wps) {
+	int j;
+	double u;
+	f3_lin_cell(ftab::INSET_M, ftab::NUM_M, p_m, j, u);
+	int geo[2];
+	double wg[2];
+	const int ng = f2_geo_pairs(p_wps, geo, wg);
+	double out = 0.0;
+	for (int gi = 0; gi < ng; ++gi) {
+		int i;
+		double t;
+		f2_log_cell(ftab::S, ftab::NUM_S, p_size, i, t);
+		const float(*Q)[ftab::NUM_M][ftab::NUM_Q] = p_kind == 0 ? ftab::INSET_LUB_Q[geo[gi]] : ftab::INSET_NS_Q[geo[gi]];
+		const float(*P)[ftab::NUM_M][ftab::NUM_Q] = p_kind == 0 ? ftab::INSET_LUB_P[geo[gi]] : ftab::INSET_NS_P[geo[gi]];
+		const int ii[2] = { i, i + 1 };
+		const double wi[2] = { 1.0 - t, t };
+		const int jj[2] = { j, j + 1 };
+		const double wj[2] = { 1.0 - u, u };
+		double v = 0.0;
+		for (int a = 0; a < 2; ++a) {
+			for (int b = 0; b < 2; ++b) {
+				if (wi[a] * wj[b] != 0.0) {
+					v += wi[a] * wj[b] * f2_m_node(Q[ii[a]][jj[b]], P[ii[a]][jj[b]], double(ftab::S[ii[a]]), p_e0, p_e1);
+				}
+			}
+		}
+		out += wg[gi] * v;
+	}
+	return out;
+}
+
+// An indenter edge's friction share at margin p_m (the FE's), interpolated as f2_phi with the margin axis
+double f3_inset_phi(double p_size, double p_m, double p_mu, double p_kg, double p_wps) {
+	int f;
+	double tf;
+	f2_mu_cell(p_mu, f, tf);
+	int j;
+	double u;
+	f3_lin_cell(ftab::INSET_M, ftab::NUM_M, p_m, j, u);
+	int kc;
+	double tk;
+	f2_log_cell(ftab::KG, ftab::NUM_KG, p_kg, kc, tk);
+	int geo[2];
+	double wg[2];
+	const int ng = f2_geo_pairs(p_wps, geo, wg);
+	double r = 0.0;
+	for (int gi = 0; gi < ng; ++gi) {
+		int i;
+		double t;
+		f2_log_cell(ftab::S, ftab::NUM_S, p_size, i, t);
+		const int kk[2] = { kc, kc + 1 };
+		const double wk[2] = { 1.0 - tk, tk };
+		const int ff[2] = { f, f + 1 };
+		const double wf[2] = { 1.0 - tf, tf };
+		const int ii[2] = { i, i + 1 };
+		const double wi[2] = { 1.0 - t, t };
+		const int jj[2] = { j, j + 1 };
+		const double wj[2] = { 1.0 - u, u };
+		for (int a = 0; a < 2; ++a) {
+			for (int b = 0; b < 2; ++b) {
+				for (int c = 0; c < 2; ++c) {
+					for (int d = 0; d < 2; ++d) {
+						r += wg[gi] * wk[a] * wf[b] * wi[c] * wj[d] * double(ftab::PHI_INSET[geo[gi]][kk[a]][ff[b]][ii[c]][jj[d]]);
+					}
+				}
+			}
+		}
+	}
+	return r;
+}
+
+// The area of the convex counter-clockwise p_poly clipped to the rectangle (the polygon clipped by the rectangle's four
+// edges: a clipped polygon can carry an edge of no length, which as a clipping edge would keep nothing)
+double f3_rect_area(const Poly &p_poly, double p_x0, double p_x1, double p_y0, double p_y1) {
+	Poly cut;
+	clip_convex(p_poly, rect(p_x0, p_x1, p_y0, p_y1), cut);
+	if (cut.n < 3) {
+		return 0.0;
+	}
+	return std::abs(signed_area(cut));
+}
+
+// The distance from an inside point along the unit axis direction (p_dx, p_dy) to the convex counter-clockwise polygon's edge
+double f3_exit(const Poly &p_ccw, double p_px, double p_py, double p_dx, double p_dy) {
+	double t = std::numeric_limits<double>::infinity();
+	for (int k = 0; k < p_ccw.n; ++k) {
+		const int k1 = (k + 1) % p_ccw.n;
+		const double ex = p_ccw.x[k1] - p_ccw.x[k], ey = p_ccw.y[k1] - p_ccw.y[k];
+		const double L = std::sqrt(ex * ex + ey * ey);
+		if (!(L > 0.0)) {
+			continue;
+		}
+		const double nx = ey / L, ny = -ex / L;
+		const double nd = nx * p_dx + ny * p_dy;
+		if (nd > 1e-15) {
+			t = MIN(t, ((nx * p_ccw.x[k] + ny * p_ccw.y[k]) - (nx * p_px + ny * p_py)) / nd);
+		}
+	}
+	return MAX(t, 0.0);
+}
+
+// The same through the union of coplanar partner faces: from the face holding the point, then on through any face that
+// holds the point it leaves by
+double f3_exit_union(const PartnerSet &p_set, double p_px, double p_py, double p_dx, double p_dy, double p_eps) {
+	double tot = 0.0;
+	double x = p_px, y = p_py;
+	bool used[MAX_PARTNERS] = {};
+	for (int it = 0; it < p_set.n; ++it) {
+		int j = -1;
+		for (int i = 0; i < p_set.n && j < 0; ++i) {
+			if (!used[i] && inside_convex(p_set.face[i], it == 0 ? x : x + p_eps * p_dx, it == 0 ? y : y + p_eps * p_dy)) {
+				j = i;
+			}
+		}
+		if (j < 0) {
+			break;
+		}
+		used[j] = true;
+		const double t = f3_exit(p_set.face[j], x, y, p_dx, p_dy);
+		tot += t;
+		x += t * p_dx;
+		y += t * p_dy;
+		if (p_set.n == 1) {
+			break;
+		}
+	}
+	return tot;
+}
+
 // The interval list of an edge stretch, less the parts another coplanar partner face covers just outside it (an edge two
 // partner faces share is inside their union, not an indenter edge)
 int f2_outside_others(const PartnerSet &p_partners, int p_self, double p_ax, double p_ay, double p_bx, double p_by, double p_t0, double p_t1, double p_eps, double r_t[][2]) {
@@ -1565,13 +1757,18 @@ void f2_edge_stretch(const F2Law &p_law, F2Work &w, int p_type, double p_ax, dou
 			w.ext[p_type][k] = std::abs(nxv) * p_law.DX[k] + std::abs(nyv) * p_law.DY[k];
 			w.anx[p_type][k] = std::abs(nxv);
 			w.any[p_type][k] = std::abs(nyv);
+			if (p_type == 1) {
+				w.px[k] = p_ax + t * vx;
+				w.py[k] = p_ay + t * vy;
+			}
 		}
 	}
 }
 
-// The face law v2 for one patch: the soft face p_soft, the partner's coplanar faces p_partners (counter-clockwise), the
+// The face law v3 for one patch: the soft face p_soft, the partner's coplanar faces p_partners (counter-clockwise), the
 // overlap of the undeformed surfaces d = d0 + gx x + gy y, the layer (E, K, h), the pair's static mu. p_edge_tol in
-// depths (F2_EDGE_TOL; 0 reads edges exactly as the desk reference does). False when the patch presses nothing.
+// depths (F2_EDGE_TOL). p_tail: the last step's contact sets and the held slide's memory, or null. False when the patch
+// presses nothing.
 bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, double p_E, double p_K, double p_h, double p_mu, double p_edge_tol, const F2Tail *p_tail, F2Law &r_law) {
 	thread_local F2Work scratch_work;
 	F2Work &w = scratch_work;
@@ -1618,34 +1815,55 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		return false;
 	}
 
-	// The grid's axes along the contactable region's longest edge (an edge another piece covers is inside the region),
-	// the angle reduced to [-45, 45) deg; the figures are turned back at the end
+	// The held slide's memory (rule 6): the gradient the contact set grew at, in the caller's frame
+	const bool has_held = p_tail != nullptr && p_tail->has_held && p_tail->held[2] > 0.0;
+	double hgx = has_held ? p_tail->held[0] : 0.0, hgy = has_held ? p_tail->held[1] : 0.0;
+
+	// The grid's turn (rule 3): the circular mean of 4 alpha over the contactable region's edges (an edge another piece
+	// covers is inside the region) weighted L exp(-(Lmax - L) / (EPS Lmax)), when its length is at least AGREE of the
+	// weights' sum; else the first longest edge. Reduced to [-45, 45) deg; the figures are turned back at the end.
 	double gx = p_gx, gy = p_gy;
 	{
-		double best = -1.0, ang = 0.0;
-		for (int i = 0; i < num_pieces; ++i) {
-			const Poly &pc = pieces[i];
-			for (int k = 0; k < pc.n; ++k) {
-				const int k1 = (k + 1) % pc.n;
-				const double ex = pc.x[k1] - pc.x[k], ey = pc.y[k1] - pc.y[k];
-				const double len = std::hypot(ex, ey);
-				if (num_pieces > 1 && len > 0.0) {
-					const double mx = 0.5 * (pc.x[k] + pc.x[k1]) + 1e-6 * h * ey / len;
-					const double my = 0.5 * (pc.y[k] + pc.y[k1]) - 1e-6 * h * ex / len;
-					bool inner = false;
-					for (int j = 0; j < num_pieces && !inner; ++j) {
-						inner = j != i && inside_convex(pieces[j], mx, my);
-					}
-					if (inner) {
+		double best = -1.0, best_ang = 0.0;
+		auto each_edge = [&](auto &&p_fn) {
+			for (int i = 0; i < num_pieces; ++i) {
+				const Poly &pc = pieces[i];
+				for (int k = 0; k < pc.n; ++k) {
+					const int k1 = (k + 1) % pc.n;
+					const double ex = pc.x[k1] - pc.x[k], ey = pc.y[k1] - pc.y[k];
+					const double len = std::hypot(ex, ey);
+					if (!(len > 0.0)) {
 						continue;
 					}
-				}
-				if (len > best) {
-					best = len;
-					ang = std::atan2(ey, ex);
+					if (num_pieces > 1) {
+						const double mx = 0.5 * (pc.x[k] + pc.x[k1]) + 1e-6 * h * ey / len;
+						const double my = 0.5 * (pc.y[k] + pc.y[k1]) - 1e-6 * h * ex / len;
+						bool inner = false;
+						for (int j = 0; j < num_pieces && !inner; ++j) {
+							inner = j != i && inside_convex(pieces[j], mx, my);
+						}
+						if (inner) {
+							continue;
+						}
+					}
+					p_fn(len, std::atan2(ey, ex));
 				}
 			}
-		}
+		};
+		each_edge([&](double p_len, double p_ang) {
+			if (p_len > best) {
+				best = p_len;
+				best_ang = p_ang;
+			}
+		});
+		double zr = 0.0, zi = 0.0, ws = 0.0;
+		each_edge([&](double p_len, double p_ang) {
+			const double wgt = p_len * std::exp(-(best - p_len) / (F3_ALIGN_EPS * best));
+			zr += wgt * std::cos(4.0 * p_ang);
+			zi += wgt * std::sin(4.0 * p_ang);
+			ws += wgt;
+		});
+		const double ang = std::hypot(zr, zi) >= F3_ALIGN_AGREE * ws ? 0.25 * std::atan2(zi, zr) : best_ang;
 		r_law.rot = ang - (PI / 2.0) * std::nearbyint(ang / (PI / 2.0));
 		if (std::abs(r_law.rot) > 1e-12) {
 			const double cr = std::cos(-r_law.rot), sn = std::sin(-r_law.rot);
@@ -1663,6 +1881,9 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 			const double gx0 = gx;
 			gx = cr * gx0 - sn * gy;
 			gy = sn * gx0 + cr * gy;
+			const double hg0 = hgx;
+			hgx = cr * hg0 - sn * hgy;
+			hgy = sn * hg0 + cr * hgy;
 			clip_pieces();
 			if (num_pieces == 0) {
 				return false;
@@ -1675,7 +1896,7 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	// The engine grid: inner lines over the contactable region's bounding box, outer lines to the soft face or BOX depths
 	double ox0 = 0.0, ox1 = 0.0, oy0 = 0.0, oy1 = 0.0;
 	PolyMoments om;
-	double dmax = -1e300;
+	double dmax = -1e300, hmax = -1e300;
 	for (int i = 0; i < num_pieces; ++i) {
 		double a0, a1, b0, b1;
 		poly_bounds(pieces[i], a0, a1, b0, b1);
@@ -1691,6 +1912,7 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		om.Syy += mi.Syy;
 		for (int k = 0; k < pieces[i].n; ++k) {
 			dmax = MAX(dmax, p_d0 + gx * pieces[i].x[k] + gy * pieces[i].y[k]);
+			hmax = MAX(hmax, hgx * pieces[i].x[k] + hgy * pieces[i].y[k]);
 		}
 	}
 	double sx0, sx1, sy0, sy1;
@@ -1746,6 +1968,7 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 
 	// The cells: centres, sizes, the layer's own face, the partner's, the interference and the held slide
 	const double gn = std::hypot(gx, gy);
+	const double hn = std::hypot(hgx, hgy);
 	for (int i = 0; i < g.nx; ++i) {
 		for (int j = 0; j < g.ny; ++j) {
 			const int k = g.k(i, j);
@@ -1759,7 +1982,15 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 			w.d[k] = p_d0 + gx * r_law.X[k] + gy * r_law.Y[k];
 			w.hx[k] = 0.0;
 			w.hy[k] = 0.0;
-			if (gn > 1e-15) {
+			if (has_held) {
+				// the slide each point made while free, by the remembered gradient
+				if (hn > 1e-15) {
+					const double s = MAX(hmax - (hgx * r_law.X[k] + hgy * r_law.Y[k]), 0.0) / hn;
+					const double mag = F2_KS * hn * s * std::pow(s / h, F2_KP - 1.0);
+					w.hx[k] = -mag * hgx / hn;
+					w.hy[k] = -mag * hgy / hn;
+				}
+			} else if (gn > 1e-15) {
 				const double s = MAX(dmax - w.d[k], 0.0) / gn;
 				const double mag = F2_KS * gn * s * std::pow(s / h, F2_KP - 1.0);
 				w.hx[k] = -mag * gx / gn;
@@ -1771,6 +2002,8 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 				w.anx[t][k] = 1.0;
 				w.any[t][k] = 0.0;
 			}
+			w.px[k] = 0.0;
+			w.py[k] = 0.0;
 		}
 	}
 
@@ -1809,9 +2042,106 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 			}
 		}
 	}
+	// Each cell's nearest indenter edge's margin (rule 1): from that edge's nearest point to the layer's own edge
+	const double lam = F3_INSET_LAMBDA;
 	for (int k = 0; k < g.n; ++k) {
-		w.stair_free[k] = w.anx[0][k] + w.any[0][k];
-		w.stair_ind[k] = w.anx[1][k] + w.any[1][k];
+		double m = std::numeric_limits<double>::infinity();
+		if (std::isfinite(w.e[1][k])) {
+			for (int s = 0; s < soft.n; ++s) {
+				const int s1 = (s + 1) % soft.n;
+				const double vx = soft.x[s1] - soft.x[s], vy = soft.y[s1] - soft.y[s];
+				double t = ((w.px[k] - soft.x[s]) * vx + (w.py[k] - soft.y[s]) * vy) / MAX(vx * vx + vy * vy, 1e-300);
+				t = MIN(MAX(t, 0.0), 1.0);
+				m = MIN(m, std::hypot(w.px[k] - (soft.x[s] + t * vx), w.py[k] - (soft.y[s] + t * vy)));
+			}
+		}
+		w.marg[k] = MIN(m / h, F2_BOX);
+		w.chi[k] = 1.0 - std::exp(-MIN(MAX(w.marg[k], 0.0), F2_BOX) / lam);
+		w.stair_ind[k] = (w.anx[1][k] + w.any[1][k]) * w.chi[k];
+	}
+
+	// The embedded edges (rule 4): the areas each cell stands for, and where each axis of a cell meets the edges
+	for (int i = 0; i < g.nx; ++i) {
+		for (int j = 0; j < g.ny; ++j) {
+			const int k = g.k(i, j);
+			const double x0 = g.xe[i], x1 = g.xe[i + 1], y0 = g.ye[j], y1 = g.ye[j + 1];
+			const double fd = MIN(MAX(f3_rect_area(soft, x0, x1, y0, y1) / w.area[k], 0.0), 1.0);
+			double fca = 0.0;
+			for (int p = 0; p < num_pieces; ++p) {
+				fca += f3_rect_area(pieces[p], x0, x1, y0, y1);
+			}
+			const double fc = MIN(MAX(fca / w.area[k], 0.0), 1.0);
+			// kept in the arrays the matrix reads: the cell's own covered parts first, the shares added below
+			w.Ad[k] = w.dom[k] ? fd * w.area[k] : 0.0;
+			w.Ac[k] = w.cont[k] ? fc * w.area[k] : 0.0;
+			w.recv_d[k] = false;
+			w.recv_c[k] = false;
+			w.rhs1[k] = fd; // scratch: the covered fractions, read by the share pass
+			w.rhsx[k] = fc;
+		}
+	}
+	for (int i = 0; i < g.nx; ++i) {
+		for (int j = 0; j < g.ny; ++j) {
+			const int k = g.k(i, j);
+			const double fd = w.rhs1[k], fc = w.rhsx[k];
+			int nb[4];
+			int nn = 0;
+			const int di[4] = { -1, 1, 0, 0 }, dj[4] = { 0, 0, -1, 1 };
+			for (int s = 0; s < 4; ++s) {
+				const int ni = i + di[s], nj = j + dj[s];
+				if (ni >= 0 && ni < g.nx && nj >= 0 && nj < g.ny) {
+					nb[nn++] = g.k(ni, nj);
+				}
+			}
+			if (!w.dom[k] && fd > 0.0) {
+				// a cell whose centre is outside the face gives its covered part to the neighbours that keep theirs
+				int cnt = 0;
+				for (int s = 0; s < nn; ++s) {
+					cnt += w.dom[nb[s]] ? 1 : 0;
+				}
+				if (cnt > 0) {
+					const double sd = fd * w.area[k] / cnt, sc = fc * w.area[k] / cnt;
+					for (int s = 0; s < nn; ++s) {
+						const int q = nb[s];
+						if (!w.dom[q]) {
+							continue;
+						}
+						w.Ad[q] += sd;
+						w.recv_d[q] = true;
+						if (w.cont[q]) {
+							w.Ac[q] += sc;
+							w.recv_c[q] = true;
+						}
+					}
+				}
+			} else if (w.dom[k] && !w.cont[k] && fc > 0.0) {
+				// a cell in the face but not under the partner gives its partner-covered part to the neighbours under it
+				int cnt = 0;
+				for (int s = 0; s < nn; ++s) {
+					cnt += w.cont[nb[s]] ? 1 : 0;
+				}
+				if (cnt > 0) {
+					const double sc = fc * w.area[k] / cnt;
+					w.Ad[k] -= fc * w.area[k];
+					for (int s = 0; s < nn; ++s) {
+						const int q = nb[s];
+						if (!w.cont[q]) {
+							continue;
+						}
+						w.Ad[q] += sc;
+						w.Ac[q] += sc;
+						w.recv_c[q] = true;
+					}
+				}
+			}
+		}
+	}
+	const double dir_x[4] = { -1.0, 1.0, 0.0, 0.0 }, dir_y[4] = { 0.0, 0.0, -1.0, 1.0 };
+	for (int k = 0; k < g.n; ++k) {
+		for (int s = 0; s < 4; ++s) {
+			w.dS[k][s] = w.dom[k] ? f3_exit(soft, r_law.X[k], r_law.Y[k], dir_x[s], dir_y[s]) : 0.0;
+			w.dP[k][s] = w.cont[k] ? f3_exit_union(partners, r_law.X[k], r_law.Y[k], dir_x[s], dir_y[s], 1e-9 * h) : 0.0;
+		}
 	}
 
 	// The no-slip field first: its contact set gives the contact's size and the friction share
@@ -1823,11 +2153,11 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	double Fref = 0.0;
 	double A_act = 0.0, sxa = 0.0, sya = 0.0;
 	for (int k = 0; k < g.n; ++k) {
-		Fref += ns.p[k] * w.area[k];
+		Fref += ns.p[k] * w.Ac[k];
 		if (ns.active[k]) {
-			A_act += w.area[k];
-			sxa += w.area[k] * r_law.X[k];
-			sya += w.area[k] * r_law.Y[k];
+			A_act += w.Ac[k];
+			sxa += w.Ac[k] * r_law.X[k];
+			sya += w.Ac[k] * r_law.Y[k];
 		}
 	}
 	if (!ns.any || !(Fref > 0.0) || !(A_act > 0.0)) {
@@ -1837,8 +2167,8 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	double Iyy_a = 0.0, Ixx_a = 0.0;
 	for (int k = 0; k < g.n; ++k) {
 		if (ns.active[k]) {
-			Iyy_a += w.area[k] * ((r_law.X[k] - cxa) * (r_law.X[k] - cxa) + r_law.DX[k] * r_law.DX[k] / 12.0);
-			Ixx_a += w.area[k] * ((r_law.Y[k] - cya) * (r_law.Y[k] - cya) + r_law.DY[k] * r_law.DY[k] / 12.0);
+			Iyy_a += w.Ac[k] * ((r_law.X[k] - cxa) * (r_law.X[k] - cxa) + r_law.DX[k] * r_law.DX[k] / 12.0);
+			Ixx_a += w.Ac[k] * ((r_law.Y[k] - cya) * (r_law.Y[k] - cya) + r_law.DY[k] * r_law.DY[k] / 12.0);
 		}
 	}
 	auto half_dims = [](double p_area, double p_Ixx, double p_Iyy, double &r_a, double &r_b) {
@@ -1856,11 +2186,13 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		const double lo = MIN(half[t][0], half[t][1]), hi = MAX(half[t][0], half[t][1]);
 		wps[t] = 1.0 - lo / hi;
 	}
+	r_law.A_act = A_act;
 
 	// The friction share: the boundary of the no-slip contact set, each face by its kind (beside a cell outside the soft
-	// face: a free face; beside one the partner does not cover: an indenter edge; beside a contactable one: a smooth edge)
-	double per[3] = { 0.0, 0.0, 0.0 }; // free, ind, smooth
-	double per_axis[2][2] = { { 0.0, 0.0 }, { 0.0, 0.0 } }; // [free, ind][normal along x, along y]
+	// face: a free face; beside one the partner does not cover: an indenter edge, by the inset tables at its cell's margin;
+	// beside a contactable one: a smooth edge)
+	double per_free[2] = { 0.0, 0.0 }; // the free faces' lengths, normal along x and along y
+	double acc_ind = 0.0, per_ind = 0.0, per_smooth = 0.0;
 	for (int k = 0; k < g.n; ++k) {
 		if (!ns.active[k]) {
 			continue;
@@ -1880,29 +2212,26 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 			}
 			const double L = axis == 0 ? r_law.DY[k] : r_law.DX[k];
 			if (!nb_dom) {
-				per[0] += L;
-				per_axis[0][axis] += L;
+				per_free[axis] += L;
 			} else if (!nb_cont) {
-				per[1] += L;
-				per_axis[1][axis] += L;
+				per_ind += L;
+				acc_ind += L * f3_inset_phi(half[1][axis], w.marg[k], p_mu, w.kg, wps[1]);
 			} else {
-				per[2] += L;
+				per_smooth += L;
 			}
 		}
 	}
-	const double tot_len = per[0] + per[1] + per[2];
+	const double tot_len = per_free[0] + per_free[1] + per_ind + per_smooth;
 	double Phi = 1.0;
 	if (tot_len > 0.0) {
-		double acc = 0.0;
-		for (int t = 0; t < 2; ++t) {
-			for (int axis = 0; axis < 2; ++axis) {
-				if (per_axis[t][axis] > 0.0) {
-					acc += per_axis[t][axis] * f2_phi(t, half[t][axis], p_mu, w.kg, wps[t], 0.0);
-				}
+		double acc = acc_ind;
+		for (int axis = 0; axis < 2; ++axis) {
+			if (per_free[axis] > 0.0) {
+				acc += per_free[axis] * f2_phi(0, half[0][axis], p_mu, w.kg, wps[0], 0.0);
 			}
 		}
 		const double tau = dmax > 1e-300 ? gn * h / dmax : 1e9;
-		acc += per[2] * f2_phi(2, 1.0, p_mu, w.kg, 0.0, tau);
+		acc += per_smooth * f2_phi(2, 1.0, p_mu, w.kg, 0.0, tau);
 		Phi = MIN(MAX(acc / tot_len, 0.0), 1.0);
 	}
 	r_law.Phi = Phi;
@@ -1924,7 +2253,8 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		}
 	}
 
-	// The FE edge multipliers of each field, from the edge types its contact reaches
+	// The FE edge multipliers (rules 1 and 2): the free face's and the indenter edge's, a cell near both of small margin
+	// taking them as one free face by the soft choice
 	auto reaches = [&](const bool *p_active, int p_type) -> bool {
 		for (int k = 0; k < g.n; ++k) {
 			if (p_active[k] && w.e[p_type][k] <= 0.75 * w.ext[p_type][k] + 1e-9 * h) {
@@ -1934,6 +2264,40 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		return false;
 	};
 	auto size_of = [&](int p_type, int p_k) -> double { return w.anx[p_type][p_k] * half[p_type][0] + w.any[p_type][p_k] * half[p_type][1]; };
+	const double smin = F3_SOFTMIN * h;
+	// p_kind 0 lub, 1 ns (the field's multiplier), -1 the friction reshaping (mix)
+	auto cell_mult = [&](int p_kind, int p_k, bool p_free, bool p_ind) -> double {
+		const bool have_f = p_free && std::isfinite(w.e[0][p_k]);
+		const bool have_i = p_ind && std::isfinite(w.e[1][p_k]);
+		const double b = have_i ? w.chi[p_k] : 1.0;
+		double a;
+		if (have_f && have_i) {
+			a = 1.0 / (1.0 + std::exp(MIN(MAX((w.e[0][p_k] - w.e[1][p_k]) / smin, -50.0), 50.0)));
+		} else {
+			a = have_f ? 1.0 : 0.0;
+		}
+		const double a_f = 1.0 - (1.0 - b) * (1.0 - a);
+		const double a_i = 1.0 - (1.0 - b) * a;
+		double v = 1.0;
+		if (have_f) {
+			const double f0 = w.recv_d[p_k] ? 0.0 : MAX(w.e[0][p_k] - 0.5 * w.ext[0][p_k], 0.0) / h;
+			const double f1 = (w.e[0][p_k] + 0.5 * w.ext[0][p_k]) / h;
+			const double mf = p_kind < 0 ? f2_mix_multiplier(0, size_of(0, p_k), p_mu, f0, f1, wps[0]) : f2_multiplier(p_kind, 0, size_of(0, p_k), f0, f1, wps[0]);
+			v *= std::pow(mf, a_f);
+		}
+		if (have_i) {
+			const double i0 = w.recv_c[p_k] ? 0.0 : MAX(w.e[1][p_k] - 0.5 * w.ext[1][p_k], 0.0) / h;
+			const double i1 = (w.e[1][p_k] + 0.5 * w.ext[1][p_k]) / h;
+			double mi;
+			if (p_kind < 0) {
+				mi = (1.0 - b) * f2_mix_multiplier(0, size_of(1, p_k), p_mu, i0, i1, wps[1]) + b * f2_mix_multiplier(1, size_of(1, p_k), p_mu, i0, i1, wps[1]);
+			} else {
+				mi = f3_inset_multiplier(p_kind, size_of(1, p_k), w.marg[p_k], i0, i1, wps[1]);
+			}
+			v *= std::pow(mi, a_i);
+		}
+		return v;
+	};
 	for (int kind = 0; kind < 2; ++kind) {
 		F2Field &f = r_law.field[kind];
 		for (int k = 0; k < g.n; ++k) {
@@ -1942,16 +2306,10 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		if (!f.solved) {
 			continue;
 		}
-		for (int t = 0; t < 2; ++t) {
-			if (!reaches(f.active, t)) {
-				continue;
-			}
-			for (int k = 0; k < g.n; ++k) {
-				if (f.active[k]) {
-					const double e0 = MAX(w.e[t][k] - 0.5 * w.ext[t][k], 0.0) / h;
-					const double e1 = (w.e[t][k] + 0.5 * w.ext[t][k]) / h;
-					w.M[kind][k] *= f2_multiplier(kind, t, size_of(t, k), e0, e1, wps[t]);
-				}
+		const bool pf = reaches(f.active, 0), pi = reaches(f.active, 1);
+		for (int k = 0; k < g.n; ++k) {
+			if (f.active[k]) {
+				w.M[kind][k] = cell_mult(kind, k, pf, pi);
 			}
 		}
 	}
@@ -1964,18 +2322,13 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		}
 		w.R[k] = 1.0;
 	}
-	// The friction reshaping at free faces and indenter edges for a Coulomb face (identity at mu 0 and bonded)
+	// The friction reshaping at free faces and indenter edges for a Coulomb face (identity at mu 0 and bonded), the edge
+	// types the no-slip contact reaches
 	if (p_mu > 0.0 && p_mu < double(ftab::MU[ftab::NUM_MU - 1])) {
-		for (int t = 0; t < 2; ++t) {
-			if (!reaches(ns.active, t)) {
-				continue;
-			}
-			for (int k = 0; k < g.n; ++k) {
-				if (lub.active[k] || ns.active[k]) {
-					const double e0 = MAX(w.e[t][k] - 0.5 * w.ext[t][k], 0.0) / h;
-					const double e1 = (w.e[t][k] + 0.5 * w.ext[t][k]) / h;
-					w.R[k] *= f2_mix_multiplier(t, size_of(t, k), p_mu, e0, e1, wps[t]);
-				}
+		const bool pf = reaches(ns.active, 0), pi = reaches(ns.active, 1);
+		for (int k = 0; k < g.n; ++k) {
+			if (lub.active[k] || ns.active[k]) {
+				w.R[k] = cell_mult(-1, k, pf, pi);
 			}
 		}
 		for (int k = 0; k < g.n; ++k) {
@@ -1985,11 +2338,11 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		}
 	}
 
-	// The figures in the caller's frame
+	// The figures in the caller's frame, each cell standing for its area under the partner
 	const double cr = std::cos(r_law.rot), sn = std::sin(r_law.rot);
 	double F = 0.0, sx = 0.0, sy = 0.0;
 	for (int k = 0; k < g.n; ++k) {
-		const double fc = w.pc[k] * w.area[k];
+		const double fc = w.pc[k] * w.Ac[k];
 		F += fc;
 		sx += fc * (cr * r_law.X[k] - sn * r_law.Y[k]);
 		sy += fc * (sn * r_law.X[k] + cr * r_law.Y[k]);
@@ -2000,7 +2353,7 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	const double cx = sx / F, cy = sy / F;
 	double rs = 0.0, m1x = 0.0, m1y = 0.0;
 	for (int k = 0; k < g.n; ++k) {
-		const double fc = w.pc[k] * w.area[k];
+		const double fc = w.pc[k] * w.Ac[k];
 		const double xo = cr * r_law.X[k] - sn * r_law.Y[k] - cx;
 		const double yo = sn * r_law.X[k] + cr * r_law.Y[k] - cy;
 		rs += fc * std::hypot(xo, yo);
@@ -2029,9 +2382,9 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 			const double xo = cr * r_law.X[k] - sn * r_law.Y[k];
 			const double yo = sn * r_law.X[k] + cr * r_law.Y[k];
 			const double DX2 = r_law.DX[k] * r_law.DX[k], DY2 = r_law.DY[k] * r_law.DY[k];
-			fa += w.area[k];
-			fyy += w.area[k] * ((yo - cy) * (yo - cy) + (DX2 * sn * sn + DY2 * cr * cr) / 12.0);
-			fxx += w.area[k] * ((xo - cx) * (xo - cx) + (DX2 * cr * cr + DY2 * sn * sn) / 12.0);
+			fa += w.Ac[k];
+			fyy += w.Ac[k] * ((yo - cy) * (yo - cy) + (DX2 * sn * sn + DY2 * cr * cr) / 12.0);
+			fxx += w.Ac[k] * ((xo - cx) * (xo - cx) + (DX2 * cr * cr + DY2 * sn * sn) / 12.0);
 			const double hx = 0.5 * (std::abs(cr) * r_law.DX[k] + std::abs(sn) * r_law.DY[k]);
 			const double hy = 0.5 * (std::abs(sn) * r_law.DX[k] + std::abs(cr) * r_law.DY[k]);
 			ex0 = MIN(ex0, xo - hx);
@@ -2055,7 +2408,7 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	r_law.J_p = Ixx + Iyy;
 
 	// The normal and tilt stiffnesses: each field's tangent pressures about the centre (in the grid's frame), times its
-	// multipliers and weight; the tilt tensor turned back
+	// multipliers, weight and contact area; the tilt tensor turned back
 	const double cxg = cr * cx + sn * cy, cyg = -sn * cx + cr * cy;
 	double kn = 0.0, kxx = 0.0, kyy = 0.0, kxy = 0.0;
 	for (int kind = 0; kind < 2; ++kind) {
@@ -2064,7 +2417,7 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 			continue;
 		}
 		for (int k = 0; k < g.n; ++k) {
-			const double s = w.M[kind][k] * r_law.wts[kind] * w.area[k];
+			const double s = w.M[kind][k] * r_law.wts[kind] * w.Ac[k];
 			const double p1 = f.t1[k] * s;
 			const double px = (f.tx[k] - cxg * f.t1[k]) * s;
 			const double py = (f.ty[k] - cyg * f.t1[k]) * s;
@@ -2084,6 +2437,20 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	r_law.kt_xy = K01;
 	r_law.passes = MAX(lub.passes, ns.passes);
 	r_law.settled = lub.settled && ns.settled;
+	// The held slide's memory after this step (rule 6): new contact area takes the current gradient, area weighted; a
+	// shrinking contact keeps the gradient and its smaller area, so that area regained counts as new
+	if (!has_held) {
+		r_law.held_out[0] = p_gx;
+		r_law.held_out[1] = p_gy;
+	} else if (A_act > p_tail->held[2]) {
+		const double wt = p_tail->held[2] / A_act;
+		r_law.held_out[0] = wt * p_tail->held[0] + (1.0 - wt) * p_gx;
+		r_law.held_out[1] = wt * p_tail->held[1] + (1.0 - wt) * p_gy;
+	} else {
+		r_law.held_out[0] = p_tail->held[0];
+		r_law.held_out[1] = p_tail->held[1];
+	}
+	r_law.held_out[2] = A_act;
 	r_law.empty = false;
 	return true;
 }
@@ -3231,6 +3598,38 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 
 	JPH::Vec3 n = manifold.mWorldSpaceNormal;
 	const JPH::RVec3 base = manifold.mBaseOffset;
+	// A face patch keeps to its last step's normal when the manifold's turns more than 45 deg in one step and reads a
+	// penetration at least twice the overlap the bodies show along the last one (Stage 1c-b fix round). The manifold's normal
+	// is meant to be the direction of least overlap, so a larger one than the last normal's means the penetration search
+	// failed for that step, which it can on two boxes with coincident faces (PS3's twist at 3 kHz: a normal 68 deg off with
+	// a depth of 13 mm on a 2 mm layer, and the faces picked along it the side faces, a patch 15 mm deep). A contact that
+	// truly moves to other faces (a block slid off an edge) turns with no more overlap along its new normal than along the
+	// last, and is never held.
+	if (p_in.tail != nullptr && manifold.mPenetrationDepth > 0.0f) {
+		const JPH::Vec3 prev(p_in.tail->mFaceNormal[0], p_in.tail->mFaceNormal[1], p_in.tail->mFaceNormal[2]);
+		const float len = prev.Length();
+		if (len > 0.5f && n.Dot(prev / len) < 0.70710678f) {
+			const JPH::Vec3 pn = prev / len;
+			SupportFace last1, last2;
+			supporting_face(body1, manifold.mSubShapeID1, pn, base, last1);
+			supporting_face(body2, manifold.mSubShapeID2, -pn, base, last2);
+			if (last1.n > 0 && last2.n > 0) {
+				// The overlap along the last normal: body 1's furthest point along it less body 2's nearest
+				float top = -std::numeric_limits<float>::max();
+				float bottom = std::numeric_limits<float>::max();
+				for (int k = 0; k < last1.n; ++k) {
+					top = MAX(top, last1.v[k].Dot(pn));
+				}
+				for (int k = 0; k < last2.n; ++k) {
+					bottom = MIN(bottom, last2.v[k].Dot(pn));
+				}
+				if (top - bottom < 0.5f * manifold.mPenetrationDepth) {
+					n = pn;
+					r_patch.mNormal = n; // the rows take it unless the face's own normal replaces it below
+				}
+			}
+		}
+	}
 
 	// The two supporting faces along the normal: body 1's faces +n, body 2's faces -n
 	SupportFace face1, face2;
@@ -3523,6 +3922,13 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 					tail.has[0] = t->mGridKind == JPH::SoftContactTail::GridFaceV2;
 					tail.has[1] = true;
 				}
+				// the held slide's memory the last step's face patch left (the face law v3, rule 6)
+				if (t != nullptr && t->mHeldArea > 0.0f) {
+					tail.has_held = true;
+					tail.held[0] = t->mHeldGradient[0];
+					tail.held[1] = t->mHeldGradient[1];
+					tail.held[2] = t->mHeldArea;
+				}
 				pressed = f2_face_law(soft_poly, partners, d0, gx, gy, soft.modulus, soft.bulk_modulus, soft.thickness, mu, F2_EDGE_TOL, &tail, *law2) && !law2->empty;
 			} else {
 				pressed = face_law(soft_poly, partners, d0 * share, gx * share, gy * share, co, p_in.tail, *law) && !law->empty;
@@ -3781,6 +4187,10 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				r_patch.mGridLong = uint8_t(g2.nx);
 				r_patch.mGridShort = uint8_t(g2.ny);
 				r_patch.mGridKind = law2->field[0].solved ? JPH::SoftContactTail::GridFaceV2 : JPH::SoftContactTail::GridFaceV2NoLub;
+				// and the held slide's memory after this step
+				r_patch.mHeldGradient[0] = float(law2->held_out[0]);
+				r_patch.mHeldGradient[1] = float(law2->held_out[1]);
+				r_patch.mHeldArea = float(law2->held_out[2]);
 			} else {
 				const Grid &g = law->full.grid;
 				for (int k = 0; k < g.n() && k < 192; ++k) {

@@ -54,7 +54,15 @@
 //   jolt_soft_face_table.gen.h, its constants checked at compile time). Active-set passes from the tail's two sets,
 //   banded Cholesky. A partner edge within 1e-3 depth of the layer's own edge is that free face (an exact coincidence
 //   and a float's noise either side read alike); coplanar partner faces press as their union. The law carries the
-//   bulk modulus itself (the compressible pad equation), so no separate compressibility term.
+//   bulk modulus itself (the compressible pad equation), so no separate compressibility term. Since the Stage 1c-b fix
+//   round it is the face law v3 (the desk reference's section 6c): an indenter edge read by its margin (the free layer
+//   between it and the layer's own edge) from the inset tables, its choke growing with the margin, so a part the pad's
+//   size or a little smaller reads continuously from the free face to the punch; a soft choice between a free face and
+//   an indenter edge of small margin where both are near; the grid turned to the mean direction of the region's
+//   near-longest edges; embedded edges (each cell stands for the area really covered, the drain and the indenter edge
+//   where the edges cross its axes), so round contacts read without the staircase's swing; at least 12 cells per axis;
+//   and the held slide's memory in the tail (the gradient the contact grew at), so a face pressed flat and then tilted
+//   makes no slide.
 // - Layer, Line and Point: the layer table (spaces/soft_layer_table/jolt_soft_layer_table.gen.h, TABLE_FORMAT.v2):
 //   a strip model of slices along a line, the axisymmetric figures at a point; outside the table, the split law (p =
 //   (E/h) d + q, lam2 q - lap q = kI d, q = 0 at free edges) on a grid one depth beyond the contact with Richardson on
