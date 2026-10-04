@@ -69,10 +69,12 @@
 //   the half grid and T3 at the pair's static mu (counted).
 // - Two Layer faces: the split law with the contact set by complementarity, each side's layer with a lubricated face,
 //   compliances in series (the lead's decision 5).
-// - Two Layer sides on a Line or a Point: the two-sided design's law (design 4.6: the softer side's split law with the
-//   layers' local terms in series) on the grid, counted as outside the table. A disclosed restriction: the lubricated
-//   series of decision 5 is not read for curved patches, since the table holds one layer's figures and a series of two
-//   through it has no desk reference yet; PS7's band layer2 cases gate the law as built.
+// - Two Layer sides on a Line or a Point (Stage 1c-b fix round, C3): the lead's decision 5 through the table, each side's
+//   layer with a lubricated face (the table's mu 0 column), compliances in series. Side i takes the share phi_i of the
+//   pair's squash and sees the other side as a radius R / phi_i, phi_1 making the two forces equal (exact for identical
+//   sides by the mirror symmetry; against fresh two-body FE within 1.3 %); a Line slice by slice. The shear rows are the
+//   two layers in series. Where a side is outside the table, the side with the larger local share reads its own law at
+//   that share (counted as outside the table).
 // - Solid: Hertz at a point, the line law of design 2.3 (UNSOURCED constants) along a line; a Solid face pair stays
 //   rigid (counted).
 // - Lumped: F = K_l d with the class's bed-of-springs profile.

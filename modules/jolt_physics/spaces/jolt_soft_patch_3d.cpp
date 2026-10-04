@@ -95,16 +95,6 @@ Coeffs split_coeffs(double p_E, double p_K, double p_h, bool p_lubricated) {
 	return co;
 }
 
-// Design 4.6's two soft sides (kept for curved patches): the local terms in series, the bulging term from the side
-// with the lower E / h
-Coeffs two_sided_design(const JoltSoftSurface3D &p_s1, const JoltSoftSurface3D &p_s2) {
-	const bool first_softer = p_s1.modulus / p_s1.thickness <= p_s2.modulus / p_s2.thickness;
-	const JoltSoftSurface3D &soft = first_softer ? p_s1 : p_s2;
-	Coeffs co = split_coeffs(soft.modulus, soft.bulk_modulus, soft.thickness, false);
-	co.Eh = 1.0 / (p_s1.thickness / p_s1.modulus + p_s2.thickness / p_s2.modulus);
-	return co;
-}
-
 // ---------------------------------------------------------------------------------------------------------------
 // Convex polygons in the patch plane
 
@@ -2649,6 +2639,7 @@ struct Lookup {
 	double m1 = 0.0; // m1 / h
 	double spin = 0.0; // SPH: r_s / h
 	double slope = 0.0; // d ln F / d ln squash
+	double rslope = 0.0; // d ln F / d ln (R / h), for two curved soft sides (Stage 1c-b fix round, C3)
 	double profile[table::NUM_ST];
 	int order = 3;
 };
@@ -2734,8 +2725,8 @@ bool table_lookup(bool p_cyl, double p_rh, double p_sh, double p_mu, double p_kg
 	}
 	r_out.order = order;
 
-	auto scalar = [&](const float (*p_arr)[table::NUM_FACE][table::NUM_RH][table::NUM_SH], bool p_slope, double *r_slope) {
-		double acc = 0.0, dacc = 0.0;
+	auto scalar = [&](const float (*p_arr)[table::NUM_FACE][table::NUM_RH][table::NUM_SH], bool p_slope, double *r_slope, double *r_rslope) {
+		double acc = 0.0, dacc = 0.0, racc = 0.0;
 		for (int k = 0; k < wk.count; ++k) {
 			for (int a = 0; a < 2; ++a) {
 				for (int b = 0; b < wu.count; ++b) {
@@ -2744,6 +2735,7 @@ bool table_lookup(bool p_cyl, double p_rh, double p_sh, double p_mu, double p_kg
 						acc += wk.w[k] * wf[a] * wu.w[b] * wv.w[c] * lq;
 						if (p_slope) {
 							dacc += wk.w[k] * wf[a] * wu.w[b] * wv.dw[c] * lq;
+							racc += wk.w[k] * wf[a] * wu.dw[b] * wv.w[c] * lq;
 						}
 					}
 				}
@@ -2752,18 +2744,21 @@ bool table_lookup(bool p_cyl, double p_rh, double p_sh, double p_mu, double p_kg
 		if (r_slope != nullptr) {
 			*r_slope = dacc;
 		}
+		if (r_rslope != nullptr) {
+			*r_rslope = racc;
+		}
 		return std::exp(acc);
 	};
 	if (p_cyl) {
-		r_out.force = scalar(table::CYL_FORCE, true, &r_out.slope);
-		r_out.width = scalar(table::CYL_HALFWIDTH, false, nullptr);
-		r_out.m1 = scalar(table::CYL_M1, false, nullptr);
+		r_out.force = scalar(table::CYL_FORCE, true, &r_out.slope, &r_out.rslope);
+		r_out.width = scalar(table::CYL_HALFWIDTH, false, nullptr, nullptr);
+		r_out.m1 = scalar(table::CYL_M1, false, nullptr, nullptr);
 		r_out.spin = 0.0;
 	} else {
-		r_out.force = scalar(table::SPH_FORCE, true, &r_out.slope);
-		r_out.width = scalar(table::SPH_RADIUS, false, nullptr);
-		r_out.m1 = scalar(table::SPH_M1, false, nullptr);
-		r_out.spin = scalar(table::SPH_SPIN, false, nullptr);
+		r_out.force = scalar(table::SPH_FORCE, true, &r_out.slope, &r_out.rslope);
+		r_out.width = scalar(table::SPH_RADIUS, false, nullptr, nullptr);
+		r_out.m1 = scalar(table::SPH_M1, false, nullptr, nullptr);
+		r_out.spin = scalar(table::SPH_SPIN, false, nullptr, nullptr);
 	}
 
 	// Profiles: bilinear in the two logs with both cell coordinates clamped, linear in the face and in ln K/G
@@ -2850,7 +2845,99 @@ struct CurvedFig {
 // Simpson weights over theta = pi k / 16, k = 0 .. 8 (TABLE_FORMAT 3)
 const double SIMPSON_W[9] = { 1, 4, 2, 4, 2, 4, 2, 4, 1 };
 
-bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p_R, const JoltSoftSurface3D &p_layer, double p_mu, CurvedFig &r_fig) {
+// Two curved soft sides through the table (Stage 1c-b fix round, C3; the desk reference's section 9b): the lead's
+// decision 5, each side's layer with a lubricated face (the table's mu 0 column) and the two compliances in series. Side i
+// takes the share phi_i of the pair's squash s and sees the other side as a radius R / phi_i: where the layers act
+// locally the interface pressure is p = (s - r^2 / 2R) / (1/k_1 + 1/k_2), so side i's compression is phi_i s - r^2 /
+// (2 R / phi_i). phi_1 makes the two sides' forces equal (a safeguarded Newton on ln F_1 - ln F_2 from the local terms'
+// share h_1/E_1 over the pair's). Exact for two identical sides: by the mirror symmetry the interface carries no shear and
+// each side carries half the gap (phi 1/2, radius 2R). Against fresh two-body FE (two layers, a frictionless interface)
+// within 1.3 % at a Point and 1.1 % along a Line (stage1cb/c3/fe_two.out.txt). The figures other than the force are the
+// side with the larger share's (side 1 on a tie).
+constexpr int TWO_SIDED_NEWTON_CAP = 40; // Newton (or bisection) steps on the share
+constexpr double TWO_SIDED_F_TOL = 1e-12; // |ln F_1 - ln F_2| at which the share is taken
+constexpr double TWO_SIDED_PHI_TOL = 1e-14; // the bracket's width at which it is not (the forces still differ)
+
+// The local terms' share of side 1, h_1/E_1 over the pair's: Newton's start (exactly 1/2 for identical sides)
+double two_sided_share0(const JoltSoftSurface3D &p_s1, const JoltSoftSurface3D &p_s2) {
+	const double a = p_s1.thickness / p_s1.modulus;
+	const double b = p_s2.thickness / p_s2.modulus;
+	return a / (a + b);
+}
+
+// The share phi of side 1 at the pair's squash p_s against a radius p_R (p_cyl: a Line's slice, per unit length), and the
+// two sides' lookups at their shares. False outside the table (a side's lookup outside it anywhere the share can lie, or
+// no share with equal forces inside it).
+bool two_sided_split(bool p_cyl, double p_s, double p_R, const JoltSoftSurface3D &p_s1, const JoltSoftSurface3D &p_s2, double &r_phi, Lookup &r_l1, Lookup &r_l2) {
+	if (!(p_s > 0.0)) {
+		return false;
+	}
+	const double rh0 = double(table::RH[0]);
+	const double rh1 = double(table::RH[table::NUM_RH - 1]);
+	const double sh1 = double(table::SH[table::NUM_SH - 1]);
+	const double h1 = p_s1.thickness;
+	const double h2 = p_s2.thickness;
+	double lo = MAX(MAX(p_R / (h1 * rh1), 1.0 - p_R / (h2 * rh0)), MAX(1.0 - sh1 * h2 / p_s, 1e-9));
+	double hi = MIN(MIN(p_R / (h1 * rh0), sh1 * h1 / p_s), MIN(1.0 - p_R / (h2 * rh1), 1.0 - 1e-9));
+	if (!(lo < hi)) {
+		return false;
+	}
+	double phi = MIN(MAX(two_sided_share0(p_s1, p_s2), lo), hi);
+	const double sc1 = p_cyl ? p_s1.modulus * h1 : p_s1.modulus * h1 * h1;
+	const double sc2 = p_cyl ? p_s2.modulus * h2 : p_s2.modulus * h2 * h2;
+	const double kg1 = kg_of(p_s1);
+	const double kg2 = kg_of(p_s2);
+	for (int it = 0; it < TWO_SIDED_NEWTON_CAP; ++it) {
+		const double q = 1.0 - phi;
+		if (!table_lookup(p_cyl, p_R / (phi * h1), phi * p_s / h1, 0.0, kg1, r_l1) || !table_lookup(p_cyl, p_R / (q * h2), q * p_s / h2, 0.0, kg2, r_l2)) {
+			return false;
+		}
+		if (!(r_l1.force > 0.0) || !(r_l2.force > 0.0)) {
+			return false;
+		}
+		const double f = std::log(sc1 * r_l1.force) - std::log(sc2 * r_l2.force);
+		if (std::abs(f) <= TWO_SIDED_F_TOL) {
+			r_phi = phi;
+			return true;
+		}
+		if (f < 0.0) {
+			lo = phi;
+		} else {
+			hi = phi;
+		}
+		if (hi - lo <= TWO_SIDED_PHI_TOL) {
+			return false;
+		}
+		const double c1 = r_l1.slope - r_l1.rslope;
+		const double c2 = r_l2.slope - r_l2.rslope;
+		const double d = c1 / phi + c2 / q;
+		double nxt = d > 0.0 ? phi - f / d : 0.5 * (lo + hi);
+		if (!(lo < nxt && nxt < hi)) {
+			nxt = 0.5 * (lo + hi);
+		}
+		phi = nxt;
+	}
+	return false;
+}
+
+// n = d ln F / d ln s of the pair at its share: (c1 c2 + phi_2 c1 b2 + phi_1 c2 b1) / (phi_2 c1 + phi_1 c2), a_i the table's
+// slope in the squash, b_i its slope in the radius, c_i = a_i - b_i (n = a for identical sides, 2 where the layers act
+// locally)
+double two_sided_exponent(double p_phi, const Lookup &p_l1, const Lookup &p_l2) {
+	const double q = 1.0 - p_phi;
+	const double b1 = p_l1.rslope;
+	const double b2 = p_l2.rslope;
+	const double c1 = p_l1.slope - b1;
+	const double c2 = p_l2.slope - b2;
+	const double den = q * c1 + p_phi * c2;
+	if (!(den > 0.0)) {
+		return p_phi >= 0.5 ? p_l1.slope : p_l2.slope;
+	}
+	return (c1 * c2 + q * c1 * b2 + p_phi * c2 * b1) / den;
+}
+
+// p_layer2 (Stage 1c-b fix round, C3): two curved soft sides, each slice through two_sided_split (p_mu unused)
+bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p_R, const JoltSoftSurface3D &p_layer, double p_mu, CurvedFig &r_fig, const JoltSoftSurface3D *p_layer2 = nullptr) {
 	const double h = p_layer.thickness;
 	const double E = p_layer.modulus;
 	const double kg = kg_of(p_layer);
@@ -2861,6 +2948,24 @@ bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p
 		P[i] = b[i] = m1[i] = dP[i] = 0.0;
 		const double s = p_s0 + p_camber * ys[i];
 		if (!(s > 0.0)) {
+			continue;
+		}
+		if (p_layer2 != nullptr) {
+			double phi = 0.0;
+			Lookup l1, l2;
+			if (!two_sided_split(true, s, p_R, p_layer, *p_layer2, phi, l1, l2)) {
+				return false;
+			}
+			const bool first = phi >= 0.5;
+			const Lookup &r = first ? l1 : l2;
+			const JoltSoftSurface3D &L = first ? p_layer : *p_layer2;
+			P[i] = L.modulus * L.thickness * r.force;
+			b[i] = L.thickness * r.width;
+			m1[i] = L.thickness * r.m1;
+			dP[i] = P[i] * two_sided_exponent(phi, l1, l2) / s;
+			for (int k = 0; k < table::NUM_ST; ++k) {
+				prof[i][k] = r.profile[k];
+			}
 			continue;
 		}
 		Lookup r;
@@ -2955,6 +3060,35 @@ bool table_point(double p_s, double p_R, const JoltSoftSurface3D &p_layer, doubl
 	r_fig.J_p = 0.5 * PI * a * a * a * a;
 	r_fig.sigma = a;
 	r_fig.n_exp = r.slope;
+	r_fig.y_lo = -a;
+	r_fig.y_hi = a;
+	return true;
+}
+
+// A Point's figures (as table_point) for two curved soft sides through the table. False outside it.
+bool two_sided_point(double p_s, double p_R, const JoltSoftSurface3D &p_s1, const JoltSoftSurface3D &p_s2, CurvedFig &r_fig) {
+	double phi = 0.0;
+	Lookup l1, l2;
+	if (!two_sided_split(false, p_s, p_R, p_s1, p_s2, phi, l1, l2)) {
+		return false;
+	}
+	const bool first = phi >= 0.5;
+	const Lookup &r = first ? l1 : l2;
+	const JoltSoftSurface3D &L = first ? p_s1 : p_s2;
+	const double h = L.thickness;
+	const double F = L.modulus * h * h * r.force;
+	const double a = h * r.width;
+	const double n = two_sided_exponent(phi, l1, l2);
+	r_fig.empty = !(F > 0.0);
+	r_fig.F = F;
+	r_fig.cx = r_fig.cy = 0.0;
+	r_fig.r_s = h * r.spin;
+	r_fig.m1x = r_fig.m1y = h * r.m1;
+	r_fig.k_n = F * n / p_s;
+	r_fig.area = PI * a * a;
+	r_fig.J_p = 0.5 * PI * a * a * a * a;
+	r_fig.sigma = a;
+	r_fig.n_exp = n;
 	r_fig.y_lo = -a;
 	r_fig.y_hi = a;
 	return true;
@@ -3156,6 +3290,48 @@ bool curved_outside(bool p_line, double p_s0, double p_R, const Coeffs &p_co, do
 		r_fig.Iyy = Iyy;
 	}
 	return ok;
+}
+
+// Two curved soft sides where the series cannot be read through the table (a side outside it; Stage 1c-b fix round, C3):
+// the side with the larger local share phi (h/E over the pair's; side 1 on a tie) reads its own single-layer law with a
+// lubricated face at the squash phi s0, the radius R / phi and the camber phi camber: the table at mu 0 where that side is
+// in it, else its fallback (the split law on the grid, T3 at mu 0). Its normal and camber stiffness are per the pair's
+// squash (times phi). Counted as outside the table. Exact for identical sides as the series is; against the two-body FE
+// with a 70 A side (outside the table's K / G axis) within 1.1 % (stage1cb/c3/fe_two.out.txt).
+bool two_sided_outside(bool p_line, double p_s0, double p_R, const JoltSoftSurface3D &p_s1, const JoltSoftSurface3D &p_s2, double p_camber, double p_ya, double p_yb, CurvedFig &r_fig) {
+	const double p1 = two_sided_share0(p_s1, p_s2);
+	const bool first = p1 >= 0.5;
+	const double phi = first ? p1 : 1.0 - p1;
+	const JoltSoftSurface3D &L = first ? p_s1 : p_s2;
+	const bool in_table = p_line ? table_line(phi * p_s0, phi * p_camber, p_ya, p_yb, p_R / phi, L, 0.0, r_fig) : table_point(phi * p_s0, p_R / phi, L, 0.0, r_fig);
+	if (in_table) {
+		if (r_fig.empty || !(r_fig.F > 0.0)) {
+			r_fig.empty = true;
+			return true;
+		}
+	} else {
+		const Coeffs co = split_coeffs(L.modulus, L.bulk_modulus, L.thickness, false);
+		if (!curved_outside(p_line, phi * p_s0, p_R / phi, co, phi * p_camber, p_ya, p_yb, r_fig)) {
+			return false;
+		}
+		if (r_fig.empty || !(r_fig.F > 0.0) || !(r_fig.area > 0.0)) {
+			r_fig.empty = true;
+			return true;
+		}
+		// a second moment Richardson takes below zero (a contact the grid barely resolves) reads T3's lowest node
+		double S = shape_factor(r_fig.area, r_fig.Ixx, r_fig.Iyy, L.thickness);
+		if (!(S > 0.0)) {
+			S = 0.0;
+		}
+		r_fig.face_ratio = table_ratio(false, S, 0.0, kg_of(L));
+		r_fig.F *= r_fig.face_ratio;
+		r_fig.k_n *= r_fig.face_ratio;
+		r_fig.kt_x *= r_fig.face_ratio;
+	}
+	r_fig.k_n *= phi;
+	r_fig.kt_x *= phi;
+	r_fig.outside_table = true;
+	return true;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -4374,13 +4550,23 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	if (soft.kind == JoltSoftSurface3D::KIND_LAYER) {
 		layer = two_layers ? s1->thickness + s2->thickness : soft.thickness;
 		rigid_stick = false;
-		const Coeffs co = two_layers ? two_sided_design(*s1, *s2) : split_coeffs(soft.modulus, soft.bulk_modulus, soft.thickness, false);
+		const Coeffs co = split_coeffs(soft.modulus, soft.bulk_modulus, soft.thickness, false);
 		shear_G = co.G;
+		// Two curved soft sides (Stage 1c-b fix round, C3): the lead's decision 5 through the table, each side's layer with
+		// a lubricated face, the compliances in series (two_sided_split); where a side is outside the table, the side with
+		// the larger local share's own law at that share (two_sided_outside, counted as outside the table)
+		const JoltSoftSurface3D *lead_side = two_layers ? (two_sided_share0(*s1, *s2) >= 0.5 ? s1 : s2) : &soft;
 		if (s0 > 0.0 || (cls == 1 && d_deep > 0.0)) {
-			if (!two_layers) {
+			if (two_layers) {
+				have = cls == 1 ? table_line(s0, camber, ya, yb, R, *s1, 0.0, fig, s2) : two_sided_point(s0, R, *s1, *s2, fig);
+				if (!have) {
+					have = two_sided_outside(cls == 1, s0, R, *s1, *s2, camber, ya, yb, fig);
+					r_result.outside_table = have && !fig.empty;
+				}
+			} else {
 				have = cls == 1 ? table_line(s0, camber, ya, yb, R, soft, mu, fig) : table_point(s0, R, soft, mu, fig);
 			}
-			if (!have) {
+			if (!have && !two_layers) {
 				have = curved_outside(cls == 1, s0, R, co, camber, ya, yb, fig);
 				if (have && !fig.empty) {
 					fig.face_ratio = table_ratio(false, shape_factor(fig.area, fig.Ixx, fig.Iyy, soft.thickness), mu, kg_of(soft));
@@ -4391,10 +4577,11 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				}
 			}
 		}
-		// The law from first touch: the table at a reference squash of a thousandth of the depth
+		// The law from first touch: the table at a reference squash of a thousandth of the depth (two soft sides: of the
+		// layers' whole depth, through the series)
 		CurvedFig ref;
-		const double s_ref = 1e-3 * soft.thickness;
-		bool ref_ok = !two_layers && (cls == 1 ? table_line(s_ref, 0.0, ya, yb, R, soft, mu, ref) : table_point(s_ref, R, soft, mu, ref));
+		const double s_ref = 1e-3 * (two_layers ? layer : soft.thickness);
+		bool ref_ok = two_layers ? (cls == 1 ? table_line(s_ref, 0.0, ya, yb, R, *s1, 0.0, ref, s2) : two_sided_point(s_ref, R, *s1, *s2, ref)) : (cls == 1 ? table_line(s_ref, 0.0, ya, yb, R, soft, mu, ref) : table_point(s_ref, R, soft, mu, ref));
 		if (ref_ok && !ref.empty && ref.F > 0.0) {
 			const double nexp = MAX(ref.n_exp, 1.0);
 			r_patch.mLawExponent = float(nexp);
@@ -4404,30 +4591,37 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			r_patch.mLawExponent = float(nexp);
 			r_patch.mLawCoefficient = float(fig.F / std::pow(MAX(d_deep, 1e-9), nexp));
 		} else if (two_layers) {
-			// Two soft sides across a gap: the series law the pressed patch uses (the two-sided design outside the table,
-			// with its face ratio), read at the squash where the contact's half-width reaches the softer layer's depth,
-			// sqrt(2 R s) = h. The grid cannot resolve a contact much narrower than its cells (N_SHORT cells across a box
-			// of half-width sqrt(2 R s) + h): at a thousandth of the depth it finds no contact at all.
-			const double s_two = MAX(1e-3 * co.h, co.h * co.h / (2.0 * R));
+			// Two soft sides outside the table across a gap: the law the pressed patch uses there (two_sided_outside), read
+			// at the squash where the leading side's contact half-width reaches its depth, sqrt(2 R s) = h. The grid cannot
+			// resolve a contact much narrower than its cells (N_SHORT cells across a box of half-width sqrt(2 R s) + h): at
+			// a thousandth of the depth it finds no contact at all.
+			const double hl = lead_side->thickness;
+			const double s_two = MAX(1e-3 * layer, hl * hl / (2.0 * R));
 			CurvedFig ref2;
-			if (curved_outside(cls == 1, s_two, R, co, 0.0, ya, yb, ref2) && !ref2.empty && ref2.F > 0.0) {
-				const double ratio2 = table_ratio(false, shape_factor(ref2.area, ref2.Ixx, ref2.Iyy, soft.thickness), mu, kg_of(soft));
+			if (two_sided_outside(cls == 1, s_two, R, *s1, *s2, 0.0, ya, yb, ref2) && !ref2.empty && ref2.F > 0.0) {
 				const double nexp = MAX(ref2.n_exp, 1.0);
 				r_patch.mLawExponent = float(nexp);
-				r_patch.mLawCoefficient = float(ref2.F * ratio2 / std::pow(s_two, nexp));
+				r_patch.mLawCoefficient = float(ref2.F / std::pow(s_two, nexp));
 			}
 		}
 		// The first-touch law the solver reads (Stage 1c-b): the pressed law itself at six squashes, the same law this
 		// patch uses when it presses. In the table, from a thousandth of the depth to the table's last squash (0.316 of
-		// it), the level line's slices or the point's figures; outside the table, for two soft sides, or where one
-		// lookup fails, the pressed fallback (the split law on the grid with its face ratio) from where the grid resolves
-		// the contact (a thousandth of the depth, or a quarter of the squash at which the contact's half-width reaches the
-		// depth, h^2 / 8R) to half the layers' whole depth. (Two curved soft sides read the two-sided design's law here as
-		// when pressed, not the lubricated series of the lead's decision 5, which the table does not cover: disclosed.)
+		// it), the level line's slices or the point's figures (two curved soft sides: of the layers' whole depth, through
+		// the series); outside the table, or where one lookup fails, the pressed fallback (the split law on the grid with
+		// its face ratio; two sides: two_sided_outside) from where the grid resolves the contact (a thousandth of the
+		// depth, or a quarter of the squash at which the contact's half-width reaches the depth, h^2 / 8R) to half the
+		// layers' whole depth.
 		const bool pressing = have && !fig.empty && fig.F > 0.0;
 		if (onset_pending || !pressing) {
 			int kept = 0;
-			if (!two_layers) {
+			if (two_layers) {
+				kept = set_law_samples(1e-3 * layer, 0.316 * layer, 6, true, [&](double p_s, double &r_F) {
+					CurvedFig f;
+					const bool ok = cls == 1 ? table_line(p_s, 0.0, ya, yb, R, *s1, 0.0, f, s2) : two_sided_point(p_s, R, *s1, *s2, f);
+					r_F = f.F;
+					return ok && !f.empty;
+				}, r_patch);
+			} else {
 				kept = set_law_samples(1e-3 * soft.thickness, 0.316 * soft.thickness, 6, true, [&](double p_s, double &r_F) {
 					CurvedFig f;
 					const bool ok = cls == 1 ? table_line(p_s, 0.0, ya, yb, R, soft, mu, f) : table_point(p_s, R, soft, mu, f);
@@ -4435,7 +4629,17 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 					return ok && !f.empty;
 				}, r_patch);
 			}
-			if (kept == 0) {
+			if (kept == 0 && two_layers) {
+				const double hh = lead_side->thickness;
+				set_law_samples(MAX(1e-3 * hh, 0.25 * hh * hh / (2.0 * R)), 0.5 * layer, 6, false, [&](double p_s, double &r_F) {
+					CurvedFig f;
+					if (!two_sided_outside(cls == 1, p_s, R, *s1, *s2, 0.0, ya, yb, f) || f.empty || !(f.F > 0.0)) {
+						return false;
+					}
+					r_F = f.F;
+					return true;
+				}, r_patch);
+			} else if (kept == 0) {
 				const double hh = co.h;
 				set_law_samples(MAX(1e-3 * hh, 0.25 * hh * hh / (2.0 * R)), 0.5 * layer, 6, false, [&](double p_s, double &r_F) {
 					CurvedFig f;
@@ -4641,7 +4845,16 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		r_patch.mRelaxationLength = float(fig.sigma);
 		r_result.m1[0] = fig.m1x;
 		r_result.m1[1] = fig.m1y;
-		if (!rigid_stick) {
+		if (!rigid_stick && two_layers) {
+			// Two soft sides (Stage 1c-b fix round, C3): the two layers' shear in series, A / (h1/G1 + h2/G2) per tangent
+			// and J_p / (h1/G1 + h2/G2) in spin
+			double G1, nu1, G2, nu2;
+			elastic(s1->modulus, s1->bulk_modulus, G1, nu1);
+			elastic(s2->modulus, s2->bulk_modulus, G2, nu2);
+			const double c = s1->thickness / G1 + s2->thickness / G2;
+			r_patch.mShearStiffness = float(fig.area / c);
+			r_patch.mSpinStiffness = float(fig.J_p / c);
+		} else if (!rigid_stick) {
 			r_patch.mShearStiffness = float(shear_G * fig.area / soft.thickness);
 			r_patch.mSpinStiffness = float(shear_G * fig.J_p / soft.thickness);
 		}
