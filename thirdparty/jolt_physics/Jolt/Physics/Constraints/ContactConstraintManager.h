@@ -584,6 +584,8 @@ private:
 		float					mArea;
 		float					mShear[2];							// the carried pre-slip deflection on this step's tangents
 		float					mSpin;								// and about the normal
+		float					mNormalDampingInvMass;				// the inverse of the mass the normal row's damping reads (the mass the touch moves)
+		float					mNormalVelocityStart;				// the normal row's J v before the solve, while the touch's moved mass is measured
 		uint8					mClass;
 		uint8					mNumTilt;
 		uint8					mNumRoll;
@@ -597,6 +599,7 @@ private:
 		bool					mFrictionFixed;						// the friction rows were applied as fixed impulses
 		bool					mSliding;							// the friction block was projected onto the ellipse
 		bool					mWarm;								// last step solved this patch: its tail's impulses warm start the rows
+		bool					mMeasureMoved;						// this step's solve adds to the tail's measure of the mass the touch moves
 	};
 
 	// CRUMB: set up a manifold's soft patch (TemplatedAddContactConstraint)

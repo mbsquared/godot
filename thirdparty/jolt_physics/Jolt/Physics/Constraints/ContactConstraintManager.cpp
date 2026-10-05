@@ -2039,6 +2039,10 @@ static constexpr int cSoftEllipseBisections = 48;
 // The smallest spin radius the ellipse divides by (mm in CRUMB's units: one micrometre)
 static constexpr double cSoftMinSpinRadius = 1.0e-3;
 
+// The mass a first touch moves is read in place of the normal row's free-body mass only when it is more than this much
+// larger (1 %): within it the two are the same mass read through the solve's float rounding, and the free-body mass is kept
+static constexpr float cSoftMovedMassBand = 0.01f;
+
 // The two bodies of a soft patch as its rows see them
 struct SoftPatchBodies
 {
@@ -2474,6 +2478,9 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 	p.mFrictionFixed = false;
 	p.mSliding = false;
 	p.mWarm = inWarm;
+	p.mMeasureMoved = false;
+	p.mNormalDampingInvMass = 0.0f;
+	p.mNormalVelocityStart = 0.0f;
 	p.mRelaxE = 1.0f;
 	p.mRelaxPhi = 1.0f;
 	p.mSurfaceVelocity = Vec3::sZero();
@@ -2593,7 +2600,7 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 		}
 		sSoftRowCompliant(p.mNormal, stiffness, zeta, 0.0f);
 		p.mBandRow = p.mNormal.mMode == SoftRowCompliant;
-		ioTail.mFlags &= ~uint32(SoftContactTail::AnchorSet);
+		ioTail.mFlags &= ~uint32(SoftContactTail::AnchorSet | SoftContactTail::MovedMeasure);
 		return; // the tail's contact set and the episode carry on unchanged
 	}
 
@@ -2641,6 +2648,7 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 			bias = inPatch.mRestitution * (impact_velocity - force_delta_velocity);
 		}
 		sSoftRowRigid(p.mNormal, bias);
+		ioTail.mFlags &= ~uint32(SoftContactTail::MovedMeasure);
 	}
 	else
 	{
@@ -2661,6 +2669,37 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 			}
 		}
 		sSoftRowCompliant(p.mNormal, stiffness, zeta, max(inPatch.mForce, 0.0f));
+
+		// The mass the normal row's damping reads (c = 2 zeta sqrt(k m), FinalizeSoftPatches): the mass the touch moves. A
+		// first touch that closes at speed measures it from its own solves (the tail sums each solve's normal impulse and
+		// the change it made in the row's closing speed) until the closing has stopped, at the deepest squash; the sums'
+		// ratio is the mass the touch moved, whatever holds the body (a joint, a support, the rest of a robot), where the
+		// row's free-body mass counts the body alone and left a bounce resolved over many steps under-damped, while an
+		// impact's restitution row meets the material's restitution on whatever the touch moves. Before the first solve,
+		// for a touch that closes slowly, and within cSoftMovedMassBand, the row's free-body mass. Measuring stops at the
+		// deepest squash, so a contact held still afterwards (a squeeze, a stall) never reads as a mass without end.
+		float w = p.mNormal.mInvEffectiveMass;
+		p.mNormalDampingInvMass = w;
+		if (ioTail.mMovedImpulse > 0.0f && ioTail.mMovedSpeed > 0.0f)
+		{
+			float w_moved = ioTail.mMovedSpeed / ioTail.mMovedImpulse;
+			if (w_moved * (1.0f + cSoftMovedMassBand) < w)
+				p.mNormalDampingInvMass = w_moved;
+		}
+		bool closing = approach - force_closing > mPhysicsSettings.mMinVelocityForRestitution;
+		if (p.mDecided && closing)
+		{
+			ioTail.mFlags |= SoftContactTail::MovedMeasure;
+			ioTail.mMovedImpulse = 0.0f;
+			ioTail.mMovedSpeed = 0.0f;
+		}
+		else if (!closing)
+			ioTail.mFlags &= ~uint32(SoftContactTail::MovedMeasure);
+		if ((ioTail.mFlags & SoftContactTail::MovedMeasure) != 0)
+		{
+			p.mMeasureMoved = true;
+			p.mNormalVelocityStart = sSoftRowVelocity(p.mNormal, b);
+		}
 	}
 
 	// The pre-slip deflection's relaxation over the step's rolling (the start-of-step rolling speed), x = rolling h / L: the
@@ -2886,8 +2925,10 @@ bool ContactConstraintManager::FinalizeSoftPatches(const uint32 *inConstraintIdx
 			float a = Square(h) * max(k * w, pair_sum);
 			r->mTheta = a > 0.5f? 1.0f - 0.5f / a : 0.0f;
 
-			// Material damping on every compliant row, c = 2 zeta sqrt(k m) with m the row's free-body mass
-			float c = 2.0f * r->mDampingRatio * sqrt(k / w);
+			// Material damping on every compliant row, c = 2 zeta sqrt(k m) with m the row's free-body mass; the normal row's
+			// m is the mass the touch moves (SetupSoftPatch)
+			float w_damping = r == &p.mNormal && p.mNormalDampingInvMass > 0.0f? p.mNormalDampingInvMass : w;
+			float c = 2.0f * r->mDampingRatio * sqrt(k / w_damping);
 			float velocity_coefficient = c + r->mTheta * k * h;
 
 			// A friction row relaxing over the step's rolling acts on the deflection's change: its force is
@@ -3343,6 +3384,14 @@ void ContactConstraintManager::StoreSoftPatch(const ContactConstraint &inConstra
 	tail.mNumCores = p.mNumCores;
 	(to_body2 * (p.mImpact? Vec3::sZero() : friction)).StoreFloat3(&tail.mFrictionImpulse);
 	(to_body2 * (p.mImpact? Vec3::sZero() : moment)).StoreFloat3(&tail.mMoment);
+
+	// The mass the touch moves: this solve's normal impulse (the row and its core guard) and the change the solve made in the
+	// row's closing speed, added to the tail's sums (SetupSoftPatch reads their ratio)
+	if (p.mMeasureMoved)
+	{
+		tail.mMovedImpulse += lambda_normal + lambda_core;
+		tail.mMovedSpeed += sSoftRowVelocity(p.mNormal, b) - p.mNormalVelocityStart;
+	}
 
 	// A gap row inside the band that carried force has resolved the first touch: the episode's onset is decided, no impact
 	if (p.mBandRow && lambda_normal > 0.0f)

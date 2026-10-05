@@ -87,11 +87,19 @@ struct SoftContactTail
 	// found along this one (a penetration search that failed)
 	float					mFaceNormal[3];
 
+	// The mass the episode's first touch moves (MovedMeasure): the normal impulse the patch applied in each step's solve
+	// while the touch closed, and the change those solves made in its closing speed, both summed from the first touch. A
+	// joint or a support that holds a body makes the touch move more than the body's free-body mass; the normal row's
+	// damping reads the sum's ratio (SetupSoftPatch)
+	float					mMovedImpulse;
+	float					mMovedSpeed;
+
 	enum EFlags : uint32
 	{
 		OnsetPending		= 1 << 0,							// The episode's first touch is still to be decided (set when the manifold is new)
 		Solved				= 1 << 1,							// A soft solve has written this tail
 		AnchorSet			= 1 << 2,							// A rigid stick holds: mAnchor1, mAnchor2 and mAnchorRotation are the last step's
+		MovedMeasure		= 1 << 3,							// The first touch closes: each solve adds to mMovedImpulse and mMovedSpeed
 	};
 };
 
