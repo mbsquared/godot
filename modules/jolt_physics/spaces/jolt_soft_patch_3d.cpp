@@ -3599,6 +3599,64 @@ Poly project(const SupportFace &p_face, const JPH::Vec3 &p_o, const JPH::Vec3 &p
 	return poly;
 }
 
+// The change of the gap between two faces' planes across their footprints' overlap, along p_n (the soft face's own
+// normal, so a manifold normal that sits off two parallel faces for a step cannot move it): -1 when the footprints do not
+// overlap, infinity when either plane is more than about 78 deg from p_n (face_plane refuses it). The desk's
+// soft_ref.face_spread (section 10b).
+double face_spread(const SupportFace &p_soft, const SupportFace &p_partner, const JPH::Vec3 &p_n) {
+	const JPH::Vec3 t1 = p_n.GetNormalizedPerpendicular();
+	const JPH::Vec3 t2 = p_n.Cross(t1);
+	const JPH::Vec3 o = JPH::Vec3::sZero();
+	const HeightPlane ps = face_plane(p_soft, o, t1, t2, p_n);
+	const HeightPlane pp = face_plane(p_partner, o, t1, t2, p_n);
+	if (!ps.valid || !pp.valid) {
+		return std::numeric_limits<double>::infinity();
+	}
+	Poly overlap;
+	clip_convex(project(p_soft, o, t1, t2), project(p_partner, o, t1, t2), overlap);
+	if (overlap.n < 3) {
+		return -1.0;
+	}
+	const double gx = pp.gx - ps.gx;
+	const double gy = pp.gy - ps.gy;
+	double lo = std::numeric_limits<double>::max();
+	double hi = -std::numeric_limits<double>::max();
+	for (int k = 0; k < overlap.n; ++k) {
+		const double g = gx * overlap.x[k] + gy * overlap.y[k];
+		lo = MIN(lo, g);
+		hi = MAX(hi, g);
+	}
+	return hi - lo;
+}
+
+// An edge face's deepest edge into a flat face along the manifold's normal p_n: its deepest vertex and the deeper of that
+// vertex's two neighbours (the later one on a tie), and how much shallower that neighbour is (r_drop). Body 1's vertices go
+// past the flat face along +p_n, body 2's along -p_n. False for an edge face of fewer than 3 vertices. The desk's
+// soft_ref.deepest_edge (section 10b).
+bool deepest_edge(const SupportFace &p_edge_face, const SupportFace &p_flat, const JPH::Vec3 &p_n, bool p_edge_is_1, SupportFace &r_edge, double &r_drop) {
+	const int m = p_edge_face.n;
+	if (m < 3 || p_flat.n < 1) {
+		return false;
+	}
+	double pen[32];
+	int k = 0;
+	for (int i = 0; i < m; ++i) {
+		const double d = double((p_edge_face.v[i] - p_flat.v[0]).Dot(p_n));
+		pen[i] = p_edge_is_1 ? d : -d;
+		if (pen[i] > pen[k]) {
+			k = i;
+		}
+	}
+	const int a = (k + m - 1) % m;
+	const int b = (k + 1) % m;
+	const int j = pen[b] >= pen[a] ? b : a;
+	r_edge.n = 2;
+	r_edge.v[0] = p_edge_face.v[k];
+	r_edge.v[1] = p_edge_face.v[j];
+	r_drop = pen[k] - pen[j];
+	return true;
+}
+
 // Brief 5.7: tangents from a body-2-fixed reference: body 2's local x projected on the patch plane, its local y when x
 // is within 30 deg of the normal
 void body_tangents(const JPH::Body &p_body2, const JPH::Vec3 &p_n, JPH::Vec3 &r_t1, JPH::Vec3 &r_t2) {
@@ -3863,6 +3921,48 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	if (cls < 0) {
 		r_result.outcome = JoltSoftBuildResult::UNCLASSED;
 		return false;
+	}
+	// A Face patch is for two faces pressed flat on each other (the edge lane, the desk's soft_ref section 10b). Two
+	// flat faces can be pressed flat on each other only where the layer can take up the tilt between them across the
+	// patch: the gap between their planes changes across their footprints' overlap by its spread, and the layer
+	// squashes at most its depth (both layers' for two). Beyond it the far side of the face can never reach the other
+	// face, and the contact is an edge of one face on the other, built along the manifold's normal as a rigid contact
+	// is and as every Line and Point is (a soft TT tyre's cap 30 deg off a wall, built as a Face along the cap's own
+	// normal, pushed the tyre back along the wall at its first touch, and along its own motion at an impact). The face
+	// is the one whose normal is nearer the manifold's (the direction of least penetration); the edge is the other
+	// face's deepest edge. The same test one dimension down: an edge whose far end sits more than the layer's depth
+	// shallower than its deep end can only ever press at that end, so the contact is its deepest vertex, a Point (a
+	// cylinder's cap: Jolt turns its octagon so a vertex points along the tilt, and at 30 deg its edges climb 4.6 mm
+	// over 24 mm); otherwise a Line along the edge. Either is rounded to the layer's depth below (design 4.1 item 2, a
+	// polyhedral edge, whatever the leaf: a cylinder's rim is a corner, not its side). The spread is read in the soft
+	// face's own frame, so a manifold normal that sits off two parallel faces for a step (PS6's island) leaves them a
+	// Face. A Layer leads it: a Lumped surface has no depth to take up a tilt and no rounding for an edge, and a Solid
+	// one against a face keeps the rigid manifold.
+	SupportFace edge_face;
+	bool face_edge = false;
+	if (cls == 0 && soft.kind == JoltSoftSurface3D::KIND_LAYER) {
+		const SupportFace &soft_face = soft_is_1 ? face1 : face2;
+		const SupportFace &partner_face = soft_is_1 ? face2 : face1;
+		const JPH::Vec3 ns = face_normal(soft_face, n);
+		const JPH::Vec3 np = face_normal(partner_face, n);
+		if (ns != JPH::Vec3::sZero() && np != JPH::Vec3::sZero()) {
+			const double depth = two_layers ? s1->thickness + s2->thickness : soft.thickness;
+			if (face_spread(soft_face, partner_face, ns) > depth) {
+				const bool soft_flat = ns.Dot(n) >= np.Dot(n);
+				const bool flat_is_1 = soft_flat == soft_is_1;
+				double drop = 0.0;
+				if (deepest_edge(flat_is_1 ? face2 : face1, flat_is_1 ? face1 : face2, n, !flat_is_1, edge_face, drop)) {
+					if (drop > depth) {
+						edge_face.n = 1;
+					}
+					cls = edge_face.n == 2 ? 1 : 2;
+					flat = flat_is_1 ? &face1 : &face2;
+					curved = &edge_face;
+					curved_is_1 = !flat_is_1;
+					face_edge = true;
+				}
+			}
+		}
 	}
 	// A face patch is built and solved along its soft face's own normal (Stage 1c-b gates). The manifold's normal comes from
 	// the penetration search, which on a squash of a few tenths of a micrometre between two boxes can sit tens of degrees
@@ -4442,8 +4542,8 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	JPH::Vec3 leaf_scale;
 	const JPH::Shape *leaf = leaf_shape(curved_body.GetShape(), curved_id, leaf_scale);
 	double R = leaf_radius(leaf, leaf_scale);
-	if (cls == 1 && !(R > 0.0)) {
-		// a polyhedral edge: rounded to the layer's depth (design 4.1 item 2)
+	if (face_edge || (cls == 1 && !(R > 0.0))) {
+		// a polyhedral edge: rounded to the layer's depth (design 4.1 item 2); a face's edge is one whatever the leaf
 		R = soft.kind == JoltSoftSurface3D::KIND_LAYER ? soft.thickness : 0.0;
 	}
 	if (!(R > 0.0)) {
@@ -4502,6 +4602,16 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			r_result.outcome = JoltSoftBuildResult::NO_OVERLAP;
 			return false;
 		}
+	} else if (face_edge) {
+		// A face's vertex: the overlap is its depth past the flat face along n, at the midpoint between the two
+		body_tangents(body2, n, t1, t2);
+		const HeightPlane at = face_plane(*flat, curved->v[0], t1, t2, n);
+		if (!at.valid) {
+			r_result.outcome = JoltSoftBuildResult::UNCLASSED;
+			return false;
+		}
+		s0 = curved_is_1 ? -at.z0 : at.z0;
+		origin = curved->v[0] + float(0.5 * at.z0) * n;
 	} else {
 		body_tangents(body2, n, t1, t2);
 		// A point: the overlap is the manifold's penetration, at the midpoint of its deepest point pair
