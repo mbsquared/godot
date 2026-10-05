@@ -887,7 +887,11 @@ int f2_inner_lines(double p_a, double p_b, double p_h, int p_n_cap, double *r_li
 	for (int k = 0; k <= m; ++k) {
 		v[count++] = p_a + half_edges[k];
 	}
-	for (int k = 0; k <= m; ++k) {
+	// The two halves meet at one middle line, the first half's. The second half's own middle, p_b less the same sum, can
+	// differ from it by a few ulps, and when the two fall either side of a rounding step of f2_unique they are kept as two
+	// lines 1e-12 apart: a sliver cell, 2 m + 1 cells in all. The cell cap's pass then asks for two cells fewer, the count
+	// is made even again, the same lines come back and the step never ends (the maze robot's soft tyre at a wall).
+	for (int k = 1; k <= m; ++k) {
 		v[count++] = p_b - half_edges[m - k];
 	}
 	memcpy(r_lines, v, sizeof(double) * count);
@@ -1924,6 +1928,8 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	if (nxl < 2 || nyl < 2) {
 		return false;
 	}
+	// The cell cap. An axis's lines never hold more inner cells than the even count they were asked for (f2_inner_lines),
+	// so each pass that asks for two fewer on the larger axis shrinks the grid, and the passes end by N_MIN
 	while ((nxl - 1) * (nyl - 1) > F2_MAX_CELLS) {
 		int nx_i = 0, ny_i = 0;
 		for (int k = 0; k + 1 < nxl; ++k) {
