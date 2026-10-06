@@ -148,25 +148,35 @@ void clip_halfplane(const Poly &p_in, double p_a, double p_b, double p_c, Poly &
 	}
 }
 
-// p_poly clipped by the convex p_clip (both made counter-clockwise first)
+// The vertices p_src uses into r_dst (no reader of a Poly looks past its n, and a whole Poly is 1160 bytes)
+void copy_poly(const Poly &p_src, Poly &r_dst) {
+	r_dst.n = p_src.n;
+	memcpy(r_dst.x, p_src.x, sizeof(double) * p_src.n);
+	memcpy(r_dst.y, p_src.y, sizeof(double) * p_src.n);
+}
+
+// p_poly clipped by the convex p_clip (both made counter-clockwise first). The edges clip into two buffers in turn,
+// each copy holding only the vertices in use: the face law clips twice a grid cell.
 void clip_convex(const Poly &p_poly, const Poly &p_clip, Poly &r_out) {
-	Poly cur = p_poly;
-	make_ccw(cur);
-	Poly clip = p_clip;
+	Poly buf[2];
+	copy_poly(p_poly, buf[0]);
+	make_ccw(buf[0]);
+	Poly clip;
+	copy_poly(p_clip, clip);
 	make_ccw(clip);
+	int cur = 0;
 	for (int k = 0; k < clip.n; ++k) {
-		if (cur.n == 0) {
+		if (buf[cur].n == 0) {
 			break;
 		}
 		const int k1 = (k + 1) % clip.n;
 		const double a = -(clip.y[k1] - clip.y[k]);
 		const double b = clip.x[k1] - clip.x[k];
 		const double c = -(a * clip.x[k] + b * clip.y[k]);
-		Poly next;
-		clip_halfplane(cur, a, b, c, next);
-		cur = next;
+		clip_halfplane(buf[cur], a, b, c, buf[cur ^ 1]);
+		cur ^= 1;
 	}
-	r_out = cur;
+	copy_poly(buf[cur], r_out);
 }
 
 // p_ccw must be counter-clockwise
@@ -1065,6 +1075,7 @@ struct F2Work {
 	double band[F2_MAX_CELLS * F2_MAX_BAND];
 	double rhs[F2_MAX_CELLS], q[F2_MAX_CELLS], y[F2_MAX_CELLS];
 	double rhs1[F2_MAX_CELLS], rhsx[F2_MAX_CELLS], rhsy[F2_MAX_CELLS];
+	double y2[F2_MAX_CELLS], y3[F2_MAX_CELLS]; // the tangent solves' second and third forward sweeps
 	double M[2][F2_MAX_CELLS], R[F2_MAX_CELLS], pc[F2_MAX_CELLS];
 	bool next[F2_MAX_CELLS];
 	double E = 0.0, h = 0.0, G = 0.0, Eh = 0.0, kq = 0.0, kg = 0.0;
@@ -1243,6 +1254,45 @@ void f2_back_solve(const F2Grid &g, F2Work &w, const double *p_b, double *r_x) {
 	}
 }
 
+// Three right-hand sides against the one factor in one pass over it: each column's sums in f2_back_solve's own order,
+// so each solution is the one f2_back_solve gives bit for bit, the band read once instead of three times
+void f2_back_solve3(const F2Grid &g, F2Work &w, const double *p_b1, const double *p_b2, const double *p_b3, double *r_x1, double *r_x2, double *r_x3) {
+	const int n = g.n;
+	const int m = g.m;
+	auto L = [&](int p_i, int p_j) -> double { return w.band[p_i * (m + 1) + (p_j - p_i + m)]; };
+	double *y1 = w.y;
+	double *y2 = w.y2;
+	double *y3 = w.y3;
+	for (int i = 0; i < n; ++i) {
+		const int lo = MAX(0, i - m);
+		double s1 = p_b1[i], s2 = p_b2[i], s3 = p_b3[i];
+		for (int k = lo; k < i; ++k) {
+			const double l = L(i, k);
+			s1 -= l * y1[k];
+			s2 -= l * y2[k];
+			s3 -= l * y3[k];
+		}
+		const double d = L(i, i);
+		y1[i] = s1 / d;
+		y2[i] = s2 / d;
+		y3[i] = s3 / d;
+	}
+	for (int i = n - 1; i >= 0; --i) {
+		const int hi = MIN(n, i + m + 1);
+		double s1 = y1[i], s2 = y2[i], s3 = y3[i];
+		for (int k = i + 1; k < hi; ++k) {
+			const double l = L(k, i);
+			s1 -= l * r_x1[k];
+			s2 -= l * r_x2[k];
+			s3 -= l * r_x3[k];
+		}
+		const double d = L(i, i);
+		r_x1[i] = s1 / d;
+		r_x2[i] = s2 / d;
+		r_x3[i] = s3 / d;
+	}
+}
+
 // One field's contact set by complementarity (p >= 0, w >= d), at most CAP_PASSES passes from the tail's set or the
 // overlap; then its tangent pressures with the last set held. As the reference, a set the cap stopped is the updated
 // one while the pressure is the last solve's.
@@ -1306,9 +1356,7 @@ bool f2_solve_field(F2Law &r_law, F2Work &w, int p_kind, const F2Tail *p_tail) {
 		w.rhsx[k] = a ? r_law.X[k] * w.Ac[k] : 0.0;
 		w.rhsy[k] = a ? r_law.Y[k] * w.Ac[k] : 0.0;
 	}
-	f2_back_solve(g, w, w.rhs1, f.t1);
-	f2_back_solve(g, w, w.rhsx, f.tx);
-	f2_back_solve(g, w, w.rhsy, f.ty);
+	f2_back_solve3(g, w, w.rhs1, w.rhsx, w.rhsy, f.t1, f.tx, f.ty);
 	f.any = false;
 	for (int k = 0; k < g.n; ++k) {
 		const bool a = f.active[k];
@@ -1361,18 +1409,56 @@ double f2_m_node(const float *p_Q, const float *p_P, double p_half, double p_e0,
 	return (p1 - p0) > 1e-300 ? (q1 - q0) / (p1 - p0) : 1.0;
 }
 
+// The logs of the face table's log axes' nodes, made once: the same std::log of the same floats f2_log_cell took on every
+// call, so every cell and coordinate comes out bit for bit as before. A function-local static is made once, by the
+// first caller, even when two threads arrive together.
+struct F2AxisLogs {
+	double s[ftab::NUM_S];
+	double c[ftab::NUM_C];
+	double kg[ftab::NUM_KG];
+
+	F2AxisLogs() {
+		for (int i = 0; i < ftab::NUM_S; ++i) {
+			s[i] = std::log(double(ftab::S[i]));
+		}
+		for (int i = 0; i < ftab::NUM_C; ++i) {
+			c[i] = std::log(double(ftab::C[i]));
+		}
+		for (int i = 0; i < ftab::NUM_KG; ++i) {
+			kg[i] = std::log(double(ftab::KG[i]));
+		}
+	}
+};
+
+// The node logs of a face table axis, or nullptr for an axis it does not hold
+const double *f2_axis_logs(const float *p_axis, int p_n) {
+	static const F2AxisLogs logs;
+	if (p_axis == ftab::S && p_n == ftab::NUM_S) {
+		return logs.s;
+	}
+	if (p_axis == ftab::C && p_n == ftab::NUM_C) {
+		return logs.c;
+	}
+	if (p_axis == ftab::KG && p_n == ftab::NUM_KG) {
+		return logs.kg;
+	}
+	return nullptr;
+}
+
 // The cell and coordinate of p_x on a log axis (clamped to it)
 void f2_log_cell(const float *p_axis, int p_n, double p_x, int &r_i, double &r_t) {
+	const double *logs = f2_axis_logs(p_axis, p_n);
+	auto node_log = [&](int p_k) -> double { return logs != nullptr ? logs[p_k] : std::log(double(p_axis[p_k])); };
 	const double x = MIN(MAX(p_x, double(p_axis[0])), double(p_axis[p_n - 1]));
 	const double lx = std::log(x);
 	int count = 0;
 	for (int i = 0; i < p_n; ++i) {
-		if (std::log(double(p_axis[i])) <= lx) {
+		if (node_log(i) <= lx) {
 			++count;
 		}
 	}
 	const int i = MIN(MAX(count - 1, 0), p_n - 2);
-	const double l0 = std::log(double(p_axis[i])), l1 = std::log(double(p_axis[i + 1]));
+	const double l0 = node_log(i), l1 = node_log(i + 1);
 	r_i = i;
 	r_t = MIN(MAX((lx - l0) / (l1 - l0), 0.0), 1.0);
 }
@@ -1635,28 +1721,48 @@ double f3_rect_area(const Poly &p_poly, double p_x0, double p_x1, double p_y0, d
 	return std::abs(signed_area(cut));
 }
 
-// The distance from an inside point along the unit axis direction (p_dx, p_dy) to the convex counter-clockwise polygon's edge
-double f3_exit(const Poly &p_ccw, double p_px, double p_py, double p_dx, double p_dy) {
-	double t = std::numeric_limits<double>::infinity();
+// A convex counter-clockwise polygon's edges as f3_exit reads them: each edge's unit outward normal and its offset along
+// it, made once a polygon (the same expressions f3_exit took for every edge on every call); ok false for an edge of no
+// length, which f3_exit skips
+struct F3Edges {
+	int n = 0;
+	double nx[MAX_POLY];
+	double ny[MAX_POLY];
+	double c[MAX_POLY];
+	bool ok[MAX_POLY];
+};
+
+void f3_edges(const Poly &p_ccw, F3Edges &r_edges) {
+	r_edges.n = p_ccw.n;
 	for (int k = 0; k < p_ccw.n; ++k) {
 		const int k1 = (k + 1) % p_ccw.n;
 		const double ex = p_ccw.x[k1] - p_ccw.x[k], ey = p_ccw.y[k1] - p_ccw.y[k];
 		const double L = std::sqrt(ex * ex + ey * ey);
-		if (!(L > 0.0)) {
+		r_edges.ok[k] = L > 0.0;
+		r_edges.nx[k] = r_edges.ok[k] ? ey / L : 0.0;
+		r_edges.ny[k] = r_edges.ok[k] ? -ex / L : 0.0;
+		r_edges.c[k] = r_edges.ok[k] ? r_edges.nx[k] * p_ccw.x[k] + r_edges.ny[k] * p_ccw.y[k] : 0.0;
+	}
+}
+
+// The distance from an inside point along the unit axis direction (p_dx, p_dy) to the convex counter-clockwise polygon's edge
+double f3_exit(const F3Edges &p_edges, double p_px, double p_py, double p_dx, double p_dy) {
+	double t = std::numeric_limits<double>::infinity();
+	for (int k = 0; k < p_edges.n; ++k) {
+		if (!p_edges.ok[k]) {
 			continue;
 		}
-		const double nx = ey / L, ny = -ex / L;
-		const double nd = nx * p_dx + ny * p_dy;
+		const double nd = p_edges.nx[k] * p_dx + p_edges.ny[k] * p_dy;
 		if (nd > 1e-15) {
-			t = MIN(t, ((nx * p_ccw.x[k] + ny * p_ccw.y[k]) - (nx * p_px + ny * p_py)) / nd);
+			t = MIN(t, (p_edges.c[k] - (p_edges.nx[k] * p_px + p_edges.ny[k] * p_py)) / nd);
 		}
 	}
 	return MAX(t, 0.0);
 }
 
-// The same through the union of coplanar partner faces: from the face holding the point, then on through any face that
-// holds the point it leaves by
-double f3_exit_union(const PartnerSet &p_set, double p_px, double p_py, double p_dx, double p_dy, double p_eps) {
+// The same through the union of coplanar partner faces (p_edges: each face's edges): from the face holding the point,
+// then on through any face that holds the point it leaves by
+double f3_exit_union(const PartnerSet &p_set, const F3Edges *p_edges, double p_px, double p_py, double p_dx, double p_dy, double p_eps) {
 	double tot = 0.0;
 	double x = p_px, y = p_py;
 	bool used[MAX_PARTNERS] = {};
@@ -1671,7 +1777,7 @@ double f3_exit_union(const PartnerSet &p_set, double p_px, double p_py, double p
 			break;
 		}
 		used[j] = true;
-		const double t = f3_exit(p_set.face[j], x, y, p_dx, p_dy);
+		const double t = f3_exit(p_edges[j], x, y, p_dx, p_dy);
 		tot += t;
 		x += t * p_dx;
 		y += t * p_dy;
@@ -2133,10 +2239,19 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		}
 	}
 	const double dir_x[4] = { -1.0, 1.0, 0.0, 0.0 }, dir_y[4] = { 0.0, 0.0, -1.0, 1.0 };
+	// each polygon's edges once, not once a cell and direction
+	thread_local F3Edges scratch_soft_edges;
+	thread_local F3Edges scratch_partner_edges[MAX_PARTNERS];
+	F3Edges &soft_edges = scratch_soft_edges;
+	F3Edges *partner_edges = scratch_partner_edges;
+	f3_edges(soft, soft_edges);
+	for (int j = 0; j < partners.n; ++j) {
+		f3_edges(partners.face[j], partner_edges[j]);
+	}
 	for (int k = 0; k < g.n; ++k) {
 		for (int s = 0; s < 4; ++s) {
-			w.dS[k][s] = w.dom[k] ? f3_exit(soft, r_law.X[k], r_law.Y[k], dir_x[s], dir_y[s]) : 0.0;
-			w.dP[k][s] = w.cont[k] ? f3_exit_union(partners, r_law.X[k], r_law.Y[k], dir_x[s], dir_y[s], 1e-9 * h) : 0.0;
+			w.dS[k][s] = w.dom[k] ? f3_exit(soft_edges, r_law.X[k], r_law.Y[k], dir_x[s], dir_y[s]) : 0.0;
+			w.dP[k][s] = w.cont[k] ? f3_exit_union(partners, partner_edges, r_law.X[k], r_law.Y[k], dir_x[s], dir_y[s], 1e-9 * h) : 0.0;
 		}
 	}
 
@@ -2545,11 +2660,69 @@ void deriv_coeffs(const double *p_x, int p_n, int p_j, int r_idx[3], double r_c[
 	r_c[2] = hl / (hr * (hl + hr));
 }
 
+// The logs of the layer table's log axes' nodes, made once (as F2AxisLogs): the same std::log of the same floats
+// axis_weights, kg_cell and the profiles' cells took on every lookup
+struct LayerAxisLogs {
+	double rh[table::NUM_RH];
+	double sh[table::NUM_SH];
+	double kg[table::NUM_KG];
+	double t3[table::T3_NUM_S];
+	double t4[table::T4_NUM_C];
+
+	LayerAxisLogs() {
+		for (int i = 0; i < table::NUM_RH; ++i) {
+			rh[i] = std::log(double(table::RH[i]));
+		}
+		for (int i = 0; i < table::NUM_SH; ++i) {
+			sh[i] = std::log(double(table::SH[i]));
+		}
+		for (int i = 0; i < table::NUM_KG; ++i) {
+			kg[i] = std::log(double(table::KG[i]));
+		}
+		for (int i = 0; i < table::T3_NUM_S; ++i) {
+			t3[i] = std::log(double(table::T3_S[i]));
+		}
+		for (int i = 0; i < table::T4_NUM_C; ++i) {
+			t4[i] = std::log(double(table::T4_C[i]));
+		}
+	}
+};
+
+const LayerAxisLogs &layer_axis_logs() {
+	static const LayerAxisLogs logs;
+	return logs;
+}
+
+// The node logs of a layer table axis, or nullptr for an axis it does not hold
+const double *layer_axis_nodes(const float *p_axis, int p_n) {
+	const LayerAxisLogs &logs = layer_axis_logs();
+	if (p_axis == table::RH && p_n == table::NUM_RH) {
+		return logs.rh;
+	}
+	if (p_axis == table::SH && p_n == table::NUM_SH) {
+		return logs.sh;
+	}
+	if (p_axis == table::KG && p_n == table::NUM_KG) {
+		return logs.kg;
+	}
+	if (p_axis == table::T3_S && p_n == table::T3_NUM_S) {
+		return logs.t3;
+	}
+	if (p_axis == table::T4_C && p_n == table::T4_NUM_C) {
+		return logs.t4;
+	}
+	return nullptr;
+}
+
 // Weights on the nodes of one log axis at p_value and their derivatives with respect to its logarithm (4.2)
 AxisWeights axis_weights(const float *p_axis, int p_n, double p_value, int p_order) {
-	double x[16];
-	for (int k = 0; k < p_n && k < 16; ++k) {
-		x[k] = std::log(double(p_axis[k]));
+	double own[16];
+	const double *x = layer_axis_nodes(p_axis, p_n);
+	if (x == nullptr) {
+		for (int k = 0; k < p_n && k < 16; ++k) {
+			own[k] = std::log(double(p_axis[k]));
+		}
+		x = own;
 	}
 	const double X = std::log(p_value);
 	int i = -1;
@@ -2627,14 +2800,15 @@ void kg_cell(double p_kg, int &r_k, double &r_t) {
 		return;
 	}
 	const double X = std::log(p_kg);
+	const double *lkg = layer_axis_logs().kg;
 	int k = -1;
 	for (int i = 0; i < table::NUM_KG; ++i) {
-		if (std::log(double(table::KG[i])) <= X) {
+		if (lkg[i] <= X) {
 			k = i;
 		}
 	}
 	k = MIN(MAX(k, 0), table::NUM_KG - 2);
-	const double x0 = std::log(double(table::KG[k])), x1 = std::log(double(table::KG[k + 1]));
+	const double x0 = lkg[k], x1 = lkg[k + 1];
 	r_k = k;
 	r_t = MIN(MAX((X - x0) / (x1 - x0), 0.0), 1.0);
 }
@@ -2649,6 +2823,40 @@ struct Lookup {
 	double profile[table::NUM_ST];
 	int order = 3;
 };
+
+// The logs of the layer table's positive scalars, made once (as F2AxisLogs): the same std::log of the same floats
+// scalar() took for every node of its stencil on every lookup, about 290 a lookup
+struct LayerScalarLogs {
+	typedef double Grid[table::NUM_KG][table::NUM_FACE][table::NUM_RH][table::NUM_SH];
+	Grid cyl_force, cyl_halfwidth, cyl_m1, sph_force, sph_radius, sph_m1, sph_spin;
+
+	static void fill(const float (*p_arr)[table::NUM_FACE][table::NUM_RH][table::NUM_SH], Grid &r_logs) {
+		for (int k = 0; k < table::NUM_KG; ++k) {
+			for (int a = 0; a < table::NUM_FACE; ++a) {
+				for (int b = 0; b < table::NUM_RH; ++b) {
+					for (int c = 0; c < table::NUM_SH; ++c) {
+						r_logs[k][a][b][c] = std::log(double(p_arr[k][a][b][c]));
+					}
+				}
+			}
+		}
+	}
+
+	LayerScalarLogs() {
+		fill(table::CYL_FORCE, cyl_force);
+		fill(table::CYL_HALFWIDTH, cyl_halfwidth);
+		fill(table::CYL_M1, cyl_m1);
+		fill(table::SPH_FORCE, sph_force);
+		fill(table::SPH_RADIUS, sph_radius);
+		fill(table::SPH_M1, sph_m1);
+		fill(table::SPH_SPIN, sph_spin);
+	}
+};
+
+const LayerScalarLogs &layer_scalar_logs() {
+	static const LayerScalarLogs logs;
+	return logs;
+}
 
 // One lookup (4.1 to 4.6). p_cyl: the plane-strain cylinder, else the axisymmetric sphere. False: outside the table.
 bool table_lookup(bool p_cyl, double p_rh, double p_sh, double p_mu, double p_kg, Lookup &r_out) {
@@ -2731,13 +2939,14 @@ bool table_lookup(bool p_cyl, double p_rh, double p_sh, double p_mu, double p_kg
 	}
 	r_out.order = order;
 
-	auto scalar = [&](const float (*p_arr)[table::NUM_FACE][table::NUM_RH][table::NUM_SH], bool p_slope, double *r_slope, double *r_rslope) {
+	// p_logs: the scalar's logs (LayerScalarLogs)
+	auto scalar = [&](const double (*p_logs)[table::NUM_FACE][table::NUM_RH][table::NUM_SH], bool p_slope, double *r_slope, double *r_rslope) {
 		double acc = 0.0, dacc = 0.0, racc = 0.0;
 		for (int k = 0; k < wk.count; ++k) {
 			for (int a = 0; a < 2; ++a) {
 				for (int b = 0; b < wu.count; ++b) {
 					for (int c = 0; c < wv.count; ++c) {
-						const double lq = std::log(double(p_arr[wk.index[k]][wf_index[a]][wu.index[b]][wv.index[c]]));
+						const double lq = p_logs[wk.index[k]][wf_index[a]][wu.index[b]][wv.index[c]];
 						acc += wk.w[k] * wf[a] * wu.w[b] * wv.w[c] * lq;
 						if (p_slope) {
 							dacc += wk.w[k] * wf[a] * wu.w[b] * wv.dw[c] * lq;
@@ -2755,23 +2964,25 @@ bool table_lookup(bool p_cyl, double p_rh, double p_sh, double p_mu, double p_kg
 		}
 		return std::exp(acc);
 	};
+	const LayerScalarLogs &logs = layer_scalar_logs();
 	if (p_cyl) {
-		r_out.force = scalar(table::CYL_FORCE, true, &r_out.slope, &r_out.rslope);
-		r_out.width = scalar(table::CYL_HALFWIDTH, false, nullptr, nullptr);
-		r_out.m1 = scalar(table::CYL_M1, false, nullptr, nullptr);
+		r_out.force = scalar(logs.cyl_force, true, &r_out.slope, &r_out.rslope);
+		r_out.width = scalar(logs.cyl_halfwidth, false, nullptr, nullptr);
+		r_out.m1 = scalar(logs.cyl_m1, false, nullptr, nullptr);
 		r_out.spin = 0.0;
 	} else {
-		r_out.force = scalar(table::SPH_FORCE, true, &r_out.slope, &r_out.rslope);
-		r_out.width = scalar(table::SPH_RADIUS, false, nullptr, nullptr);
-		r_out.m1 = scalar(table::SPH_M1, false, nullptr, nullptr);
-		r_out.spin = scalar(table::SPH_SPIN, false, nullptr, nullptr);
+		r_out.force = scalar(logs.sph_force, true, &r_out.slope, &r_out.rslope);
+		r_out.width = scalar(logs.sph_radius, false, nullptr, nullptr);
+		r_out.m1 = scalar(logs.sph_m1, false, nullptr, nullptr);
+		r_out.spin = scalar(logs.sph_spin, false, nullptr, nullptr);
 	}
 
 	// Profiles: bilinear in the two logs with both cell coordinates clamped, linear in the face and in ln K/G
 	const int i = wu.cell;
 	const int j = wv.cell;
-	double lu = (std::log(p_rh) - std::log(double(table::RH[i]))) / (std::log(double(table::RH[i + 1])) - std::log(double(table::RH[i])));
-	double lv = (std::log(p_sh) - std::log(double(table::SH[j]))) / (std::log(double(table::SH[j + 1])) - std::log(double(table::SH[j])));
+	const LayerAxisLogs &axis_logs = layer_axis_logs();
+	double lu = (std::log(p_rh) - axis_logs.rh[i]) / (axis_logs.rh[i + 1] - axis_logs.rh[i]);
+	double lv = (std::log(p_sh) - axis_logs.sh[j]) / (axis_logs.sh[j + 1] - axis_logs.sh[j]);
 	lu = MIN(MAX(lu, 0.0), 1.0);
 	lv = MIN(MAX(lv, 0.0), 1.0);
 	int kc;
@@ -2949,6 +3160,12 @@ bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p
 	const double kg = kg_of(p_layer);
 	const double dy = (p_yb - p_ya) / N_SLICES;
 	double ys[N_SLICES], P[N_SLICES], b[N_SLICES], m1[N_SLICES], dP[N_SLICES], prof[N_SLICES][table::NUM_ST];
+	// A slice at the squash of the last slice looked up takes that lookup again: the same arguments into the same pure
+	// lookup, which writes every member read below. A level strip (camber 0, as the first-touch law's reference) has one
+	// squash on every slice, so it makes one lookup, not 24.
+	Lookup look;
+	double look_squash = 0.0;
+	bool look_have = false;
 	for (int i = 0; i < N_SLICES; ++i) {
 		ys[i] = p_ya + (double(i) + 0.5) * dy;
 		P[i] = b[i] = m1[i] = dP[i] = 0.0;
@@ -2974,16 +3191,19 @@ bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p
 			}
 			continue;
 		}
-		Lookup r;
-		if (!table_lookup(true, p_R / h, s / h, p_mu, kg, r)) {
-			return false;
+		if (!look_have || s != look_squash) {
+			if (!table_lookup(true, p_R / h, s / h, p_mu, kg, look)) {
+				return false;
+			}
+			look_squash = s;
+			look_have = true;
 		}
-		P[i] = E * h * r.force;
-		b[i] = h * r.width;
-		m1[i] = h * r.m1;
-		dP[i] = P[i] * r.slope / s;
+		P[i] = E * h * look.force;
+		b[i] = h * look.width;
+		m1[i] = h * look.m1;
+		dP[i] = P[i] * look.slope / s;
 		for (int k = 0; k < table::NUM_ST; ++k) {
-			prof[i][k] = r.profile[k];
+			prof[i][k] = look.profile[k];
 		}
 	}
 	double F = 0.0;
