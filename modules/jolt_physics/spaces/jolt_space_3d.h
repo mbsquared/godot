@@ -127,6 +127,9 @@ private:
 	LocalVector<SoftPatchRecord> soft_records;
 	uint32_t soft_record_count = 0;
 
+	// CRUMB (soft fix B, P5): the face laws kept across steps, with this space's own step counter (never another space's)
+	JoltSoftFaceReuseCache soft_face_cache;
+
 	void _pre_step(float p_step);
 	void _post_step(float p_step);
 
@@ -194,6 +197,8 @@ public:
 	bool soft_surfaces_supported() const;
 	bool are_soft_contacts_enabled() const { return soft_contacts_enabled; }
 	bool is_soft_shear_enabled() const { return soft_shear_enabled; }
+	// The kept face laws (physics thread only, inside the step)
+	JoltSoftFaceReuseCache *get_soft_face_cache() { return &soft_face_cache; }
 	void count_soft_contact(SoftCount p_count) { soft_counts[p_count].increment(); }
 	// Whether the step keeps its patch figures (physics/jolt_physics_3d/debug/soft_patch_figures)
 	static bool are_soft_patch_figures_kept();

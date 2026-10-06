@@ -311,6 +311,12 @@ bool JoltContactListener3D::_try_apply_soft_patch(const JPH::Body &p_jolt_body1,
 	input.static_friction = p_settings.mCombinedFriction;
 	input.sliding_friction = MIN(JoltSpace3D::combine_friction(kinetic1, kinetic2), p_settings.mCombinedFriction);
 	input.tail = p_settings.mSoftTail;
+	// soft fix B (P5): the face law kept across steps, by the manifold's bodies and sub shapes
+	input.face_cache = space->get_soft_face_cache();
+	input.face_key.body1 = p_jolt_body1.GetID().GetIndexAndSequenceNumber();
+	input.face_key.sub1 = p_manifold.mSubShapeID1.GetValue();
+	input.face_key.body2 = p_jolt_body2.GetID().GetIndexAndSequenceNumber();
+	input.face_key.sub2 = p_manifold.mSubShapeID2.GetValue();
 
 	JoltSoftBuildResult result;
 	if (jolt_build_soft_patch(input, *p_settings.mSoftPatch, result)) {

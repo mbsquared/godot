@@ -91,6 +91,7 @@ SafeNumeric<uint64_t> crumb_step_serials;
 
 void JoltSpace3D::_pre_step(float p_step) {
 	step_serial = crumb_step_serials.increment();
+	soft_face_cache.begin_step();
 
 	flush_pending_objects();
 
@@ -115,6 +116,7 @@ void JoltSpace3D::_pre_step(float p_step) {
 
 void JoltSpace3D::_post_step(float p_step) {
 	contact_listener->post_step();
+	soft_face_cache.end_step();
 
 	while (shapes_changed_list.first()) {
 		JoltShapedObject3D *object = shapes_changed_list.first()->self();
@@ -165,6 +167,8 @@ void JoltSpace3D::_init_physics_system() {
 	const bool block_warm_start = OS::get_singleton()->get_environment("CRUMB_SOFT_BLOCK") != "0";
 	soft_shear_enabled = OS::get_singleton()->get_environment("CRUMB_SOFT_SHEAR") != "0";
 	physics_system->InitSoftContacts((JPH::uint)MAX(JoltProjectSettings::max_soft_contact_patches, 0), block_warm_start);
+	// The kept face laws' switches (CRUMB_SOFT_FACE_REUSE_UM, _LOG, _CHECK; jolt_soft_patch_3d.h)
+	soft_face_cache.configure();
 
 	physics_system->SetSimCollideBodyVsBody([](const JPH::Body &p_body1, const JPH::Body &p_body2, JPH::Mat44Arg p_transform_com1, JPH::Mat44Arg p_transform_com2, JPH::CollideShapeSettings &p_collide_shape_settings, JPH::CollideShapeCollector &p_collector, const JPH::ShapeFilter &p_shape_filter) {
 		if (p_body1.IsSensor() || p_body2.IsSensor()) {
@@ -244,6 +248,8 @@ bool JoltSpace3D::rebuild(const LocalVector<JoltObject3D *> &p_objects) {
 	pending_objects_sleeping.clear();
 	pending_objects_awake.clear();
 	contact_listener->reset();
+	// The kept face laws go with the old world: the fresh one hands its bodies the same ids again
+	soft_face_cache.clear();
 
 	// The world holds references to the layer tables, so it goes first.
 	delete physics_system;

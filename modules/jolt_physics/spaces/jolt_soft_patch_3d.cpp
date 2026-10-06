@@ -35,6 +35,9 @@
 
 #include "../jolt_project_settings.h"
 
+#include "core/os/os.h"
+#include "core/string/print_string.h"
+
 #include "Jolt/Geometry/AABox.h"
 #include "Jolt/Physics/Collision/Shape/CapsuleShape.h"
 #include "Jolt/Physics/Collision/Shape/CompoundShape.h"
@@ -45,6 +48,7 @@
 #include "Jolt/Physics/Collision/Shape/SphereShape.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -1081,6 +1085,28 @@ struct F2Work {
 	double E = 0.0, h = 0.0, G = 0.0, Eh = 0.0, kq = 0.0, kg = 0.0;
 };
 
+// What one evaluation leaves for a reuse in a later step (soft fix B, P5): each field's last solve and raw tangent solves,
+// the cells' areas, multipliers and classes, the contactable pieces, and the plane and the friction share's parts in the
+// grid's frame. Written only when the caller asks (f2_face_law's r_cap), only for the grid's cells; it changes no result.
+struct F2Capture {
+	double q0[2][F2_MAX_CELLS]; // each field's last solve's q on every cell
+	double r1[2][F2_MAX_CELLS]; // and its raw tangent solves (w = 1, X and Y on the held set, before the set's mask)
+	double rx[2][F2_MAX_CELLS];
+	double ry[2][F2_MAX_CELLS];
+	double Ac[F2_MAX_CELLS];
+	double Mpre[2][F2_MAX_CELLS]; // the fields' multipliers before the friction reshaping
+	double R[F2_MAX_CELLS]; // the friction reshaping
+	bool dom[F2_MAX_CELLS];
+	bool cont[F2_MAX_CELLS];
+	int num_pieces = 0;
+	Poly pieces[MAX_PARTNERS]; // the contactable pieces, in the grid's frame
+	double d0 = 0.0, gxg = 0.0, gyg = 0.0; // the plane the law read, its gradient in the grid's frame
+	double acc_fixed = 0.0, per_smooth = 0.0, tot_len = 0.0; // the friction share's parts that do not read tau
+	double kg = 0.0, h = 0.0, E = 0.0;
+	double A_act = 0.0;
+	bool has_held = false;
+};
+
 // The film system of one field for a given contact set (symmetric positive definite, banded)
 void f2_assemble_matrix(const F2Law &p_law, F2Work &w, const bool *p_active, int p_kind) {
 	const F2Grid &g = p_law.grid;
@@ -1296,7 +1322,7 @@ void f2_back_solve3(const F2Grid &g, F2Work &w, const double *p_b1, const double
 // One field's contact set by complementarity (p >= 0, w >= d), at most CAP_PASSES passes from the tail's set or the
 // overlap; then its tangent pressures with the last set held. As the reference, a set the cap stopped is the updated
 // one while the pressure is the last solve's.
-bool f2_solve_field(F2Law &r_law, F2Work &w, int p_kind, const F2Tail *p_tail) {
+bool f2_solve_field(F2Law &r_law, F2Work &w, int p_kind, const F2Tail *p_tail, F2Capture *r_cap) {
 	const F2Grid &g = r_law.grid;
 	F2Field &f = r_law.field[p_kind];
 	const double alpha = p_kind == 1 ? F2_ALPHA_NS : F2_ALPHA_LUB;
@@ -1357,6 +1383,14 @@ bool f2_solve_field(F2Law &r_law, F2Work &w, int p_kind, const F2Tail *p_tail) {
 		w.rhsy[k] = a ? r_law.Y[k] * w.Ac[k] : 0.0;
 	}
 	f2_back_solve3(g, w, w.rhs1, w.rhsx, w.rhsy, f.t1, f.tx, f.ty);
+	if (r_cap != nullptr) {
+		for (int k = 0; k < g.n; ++k) {
+			r_cap->q0[p_kind][k] = w.q[k];
+			r_cap->r1[p_kind][k] = f.t1[k];
+			r_cap->rx[p_kind][k] = f.tx[k];
+			r_cap->ry[p_kind][k] = f.ty[k];
+		}
+	}
 	f.any = false;
 	for (int k = 0; k < g.n; ++k) {
 		const bool a = f.active[k];
@@ -1865,11 +1899,117 @@ void f2_edge_stretch(const F2Law &p_law, F2Work &w, int p_type, double p_ax, dou
 	}
 }
 
+// The law's figures from its fields: each cell's pressure p_pc standing for its area under the partner p_Ac, the fields'
+// multipliers p_M (the friction reshaping included); r_law's grid, cells, fields, weights and turn as the law left them.
+// The face law's own block, kept in one place so that a reuse (soft fix B) makes its figures with the same operations in
+// the same order. False when the cells press nothing.
+bool f2_figures(F2Law &r_law, const double *p_Ac, const double *p_pc, const double (*p_M)[F2_MAX_CELLS]) {
+	const F2Grid &g = r_law.grid;
+	// The figures in the caller's frame, each cell standing for its area under the partner
+	const double cr = std::cos(r_law.rot), sn = std::sin(r_law.rot);
+	double F = 0.0, sx = 0.0, sy = 0.0;
+	for (int k = 0; k < g.n; ++k) {
+		const double fc = p_pc[k] * p_Ac[k];
+		F += fc;
+		sx += fc * (cr * r_law.X[k] - sn * r_law.Y[k]);
+		sy += fc * (sn * r_law.X[k] + cr * r_law.Y[k]);
+	}
+	if (!(F > 0.0)) {
+		return false;
+	}
+	const double cx = sx / F, cy = sy / F;
+	double rs = 0.0, m1x = 0.0, m1y = 0.0;
+	for (int k = 0; k < g.n; ++k) {
+		const double fc = p_pc[k] * p_Ac[k];
+		const double xo = cr * r_law.X[k] - sn * r_law.Y[k] - cx;
+		const double yo = sn * r_law.X[k] + cr * r_law.Y[k] - cy;
+		rs += fc * std::hypot(xo, yo);
+		m1x += fc * std::abs(xo);
+		m1y += fc * std::abs(yo);
+	}
+	r_law.F = F;
+	r_law.cx = cx;
+	r_law.cy = cy;
+	r_law.r_s = rs / F;
+	r_law.m1x = m1x / F;
+	r_law.m1y = m1y / F;
+	double area = 0.0, Ixx = 0.0, Iyy = 0.0;
+	r_law.edge_x[0] = r_law.edge_x[1] = r_law.edge_y[0] = r_law.edge_y[1] = 0.0;
+	for (int kind = 0; kind < 2; ++kind) {
+		const F2Field &f = r_law.field[kind];
+		if (!f.solved) {
+			continue;
+		}
+		double fa = 0.0, fxx = 0.0, fyy = 0.0;
+		double ex0 = 1e300, ex1 = -1e300, ey0 = 1e300, ey1 = -1e300;
+		for (int k = 0; k < g.n; ++k) {
+			if (!f.active[k]) {
+				continue;
+			}
+			const double xo = cr * r_law.X[k] - sn * r_law.Y[k];
+			const double yo = sn * r_law.X[k] + cr * r_law.Y[k];
+			const double DX2 = r_law.DX[k] * r_law.DX[k], DY2 = r_law.DY[k] * r_law.DY[k];
+			fa += p_Ac[k];
+			fyy += p_Ac[k] * ((yo - cy) * (yo - cy) + (DX2 * sn * sn + DY2 * cr * cr) / 12.0);
+			fxx += p_Ac[k] * ((xo - cx) * (xo - cx) + (DX2 * cr * cr + DY2 * sn * sn) / 12.0);
+			const double hx = 0.5 * (std::abs(cr) * r_law.DX[k] + std::abs(sn) * r_law.DY[k]);
+			const double hy = 0.5 * (std::abs(sn) * r_law.DX[k] + std::abs(cr) * r_law.DY[k]);
+			ex0 = MIN(ex0, xo - hx);
+			ex1 = MAX(ex1, xo + hx);
+			ey0 = MIN(ey0, yo - hy);
+			ey1 = MAX(ey1, yo + hy);
+		}
+		area += r_law.wts[kind] * fa;
+		Ixx += r_law.wts[kind] * fyy;
+		Iyy += r_law.wts[kind] * fxx;
+		if (f.any) {
+			r_law.edge_x[0] += r_law.wts[kind] * (ex0 - cx);
+			r_law.edge_x[1] += r_law.wts[kind] * (ex1 - cx);
+			r_law.edge_y[0] += r_law.wts[kind] * (ey0 - cy);
+			r_law.edge_y[1] += r_law.wts[kind] * (ey1 - cy);
+		}
+	}
+	r_law.area = area;
+	r_law.Ixx = Ixx;
+	r_law.Iyy = Iyy;
+	r_law.J_p = Ixx + Iyy;
+
+	// The normal and tilt stiffnesses: each field's tangent pressures about the centre (in the grid's frame), times its
+	// multipliers, weight and contact area; the tilt tensor turned back
+	const double cxg = cr * cx + sn * cy, cyg = -sn * cx + cr * cy;
+	double kn = 0.0, kxx = 0.0, kyy = 0.0, kxy = 0.0;
+	for (int kind = 0; kind < 2; ++kind) {
+		const F2Field &f = r_law.field[kind];
+		if (!f.solved) {
+			continue;
+		}
+		for (int k = 0; k < g.n; ++k) {
+			const double s = p_M[kind][k] * r_law.wts[kind] * p_Ac[k];
+			const double p1 = f.t1[k] * s;
+			const double px = (f.tx[k] - cxg * f.t1[k]) * s;
+			const double py = (f.ty[k] - cyg * f.t1[k]) * s;
+			kn += p1;
+			kxx += px * (r_law.X[k] - cxg);
+			kxy += px * (r_law.Y[k] - cyg);
+			kyy += py * (r_law.Y[k] - cyg);
+		}
+	}
+	r_law.k_n = kn;
+	// R K R^T with R = [[cr, -sn], [sn, cr]]
+	const double K00 = cr * (cr * kxx - sn * kxy) - sn * (cr * kxy - sn * kyy);
+	const double K01 = cr * (sn * kxx + cr * kxy) - sn * (sn * kxy + cr * kyy);
+	const double K11 = sn * (sn * kxx + cr * kxy) + cr * (sn * kxy + cr * kyy);
+	r_law.kt_y = K00;
+	r_law.kt_x = K11;
+	r_law.kt_xy = K01;
+	return true;
+}
+
 // The face law v3 for one patch: the soft face p_soft, the partner's coplanar faces p_partners (counter-clockwise), the
 // overlap of the undeformed surfaces d = d0 + gx x + gy y, the layer (E, K, h), the pair's static mu. p_edge_tol in
 // depths (F2_EDGE_TOL). p_tail: the last step's contact sets and the held slide's memory, or null. False when the patch
 // presses nothing.
-bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, double p_E, double p_K, double p_h, double p_mu, double p_edge_tol, const F2Tail *p_tail, F2Law &r_law) {
+bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, double p_E, double p_K, double p_h, double p_mu, double p_edge_tol, const F2Tail *p_tail, F2Law &r_law, F2Capture *r_cap = nullptr) {
 	thread_local F2Work scratch_work;
 	F2Work &w = scratch_work;
 	r_law.empty = true;
@@ -2258,7 +2398,7 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	// The no-slip field first: its contact set gives the contact's size and the friction share
 	F2Field &ns = r_law.field[1];
 	F2Field &lub = r_law.field[0];
-	if (!f2_solve_field(r_law, w, 1, p_tail)) {
+	if (!f2_solve_field(r_law, w, 1, p_tail, r_cap)) {
 		return false;
 	}
 	double Fref = 0.0;
@@ -2333,6 +2473,11 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		}
 	}
 	const double tot_len = per_free[0] + per_free[1] + per_ind + per_smooth;
+	if (r_cap != nullptr) {
+		r_cap->per_smooth = per_smooth;
+		r_cap->tot_len = tot_len;
+		r_cap->acc_fixed = 0.0;
+	}
 	double Phi = 1.0;
 	if (tot_len > 0.0) {
 		double acc = acc_ind;
@@ -2340,6 +2485,9 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 			if (per_free[axis] > 0.0) {
 				acc += per_free[axis] * f2_phi(0, half[0][axis], p_mu, w.kg, wps[0], 0.0);
 			}
+		}
+		if (r_cap != nullptr) {
+			r_cap->acc_fixed = acc;
 		}
 		const double tau = dmax > 1e-300 ? gn * h / dmax : 1e9;
 		acc += per_smooth * f2_phi(2, 1.0, p_mu, w.kg, 0.0, tau);
@@ -2350,7 +2498,7 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 	r_law.wts[1] = Phi;
 	// A field whose weight is nothing is not solved (the frictionless field of a bonded face)
 	if (r_law.wts[0] > 1e-12) {
-		if (!f2_solve_field(r_law, w, 0, p_tail)) {
+		if (!f2_solve_field(r_law, w, 0, p_tail, r_cap)) {
 			return false;
 		}
 	} else {
@@ -2424,6 +2572,12 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 			}
 		}
 	}
+	if (r_cap != nullptr) {
+		for (int k = 0; k < g.n; ++k) {
+			r_cap->Mpre[0][k] = w.M[0][k];
+			r_cap->Mpre[1][k] = w.M[1][k];
+		}
+	}
 	for (int k = 0; k < g.n; ++k) {
 		w.pc[k] = 0.0;
 		for (int kind = 0; kind < 2; ++kind) {
@@ -2449,103 +2603,10 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		}
 	}
 
-	// The figures in the caller's frame, each cell standing for its area under the partner
-	const double cr = std::cos(r_law.rot), sn = std::sin(r_law.rot);
-	double F = 0.0, sx = 0.0, sy = 0.0;
-	for (int k = 0; k < g.n; ++k) {
-		const double fc = w.pc[k] * w.Ac[k];
-		F += fc;
-		sx += fc * (cr * r_law.X[k] - sn * r_law.Y[k]);
-		sy += fc * (sn * r_law.X[k] + cr * r_law.Y[k]);
-	}
-	if (!(F > 0.0)) {
+	// The figures (f2_figures: the block that stood here, unchanged)
+	if (!f2_figures(r_law, w.Ac, w.pc, w.M)) {
 		return false;
 	}
-	const double cx = sx / F, cy = sy / F;
-	double rs = 0.0, m1x = 0.0, m1y = 0.0;
-	for (int k = 0; k < g.n; ++k) {
-		const double fc = w.pc[k] * w.Ac[k];
-		const double xo = cr * r_law.X[k] - sn * r_law.Y[k] - cx;
-		const double yo = sn * r_law.X[k] + cr * r_law.Y[k] - cy;
-		rs += fc * std::hypot(xo, yo);
-		m1x += fc * std::abs(xo);
-		m1y += fc * std::abs(yo);
-	}
-	r_law.F = F;
-	r_law.cx = cx;
-	r_law.cy = cy;
-	r_law.r_s = rs / F;
-	r_law.m1x = m1x / F;
-	r_law.m1y = m1y / F;
-	double area = 0.0, Ixx = 0.0, Iyy = 0.0;
-	r_law.edge_x[0] = r_law.edge_x[1] = r_law.edge_y[0] = r_law.edge_y[1] = 0.0;
-	for (int kind = 0; kind < 2; ++kind) {
-		const F2Field &f = r_law.field[kind];
-		if (!f.solved) {
-			continue;
-		}
-		double fa = 0.0, fxx = 0.0, fyy = 0.0;
-		double ex0 = 1e300, ex1 = -1e300, ey0 = 1e300, ey1 = -1e300;
-		for (int k = 0; k < g.n; ++k) {
-			if (!f.active[k]) {
-				continue;
-			}
-			const double xo = cr * r_law.X[k] - sn * r_law.Y[k];
-			const double yo = sn * r_law.X[k] + cr * r_law.Y[k];
-			const double DX2 = r_law.DX[k] * r_law.DX[k], DY2 = r_law.DY[k] * r_law.DY[k];
-			fa += w.Ac[k];
-			fyy += w.Ac[k] * ((yo - cy) * (yo - cy) + (DX2 * sn * sn + DY2 * cr * cr) / 12.0);
-			fxx += w.Ac[k] * ((xo - cx) * (xo - cx) + (DX2 * cr * cr + DY2 * sn * sn) / 12.0);
-			const double hx = 0.5 * (std::abs(cr) * r_law.DX[k] + std::abs(sn) * r_law.DY[k]);
-			const double hy = 0.5 * (std::abs(sn) * r_law.DX[k] + std::abs(cr) * r_law.DY[k]);
-			ex0 = MIN(ex0, xo - hx);
-			ex1 = MAX(ex1, xo + hx);
-			ey0 = MIN(ey0, yo - hy);
-			ey1 = MAX(ey1, yo + hy);
-		}
-		area += r_law.wts[kind] * fa;
-		Ixx += r_law.wts[kind] * fyy;
-		Iyy += r_law.wts[kind] * fxx;
-		if (f.any) {
-			r_law.edge_x[0] += r_law.wts[kind] * (ex0 - cx);
-			r_law.edge_x[1] += r_law.wts[kind] * (ex1 - cx);
-			r_law.edge_y[0] += r_law.wts[kind] * (ey0 - cy);
-			r_law.edge_y[1] += r_law.wts[kind] * (ey1 - cy);
-		}
-	}
-	r_law.area = area;
-	r_law.Ixx = Ixx;
-	r_law.Iyy = Iyy;
-	r_law.J_p = Ixx + Iyy;
-
-	// The normal and tilt stiffnesses: each field's tangent pressures about the centre (in the grid's frame), times its
-	// multipliers, weight and contact area; the tilt tensor turned back
-	const double cxg = cr * cx + sn * cy, cyg = -sn * cx + cr * cy;
-	double kn = 0.0, kxx = 0.0, kyy = 0.0, kxy = 0.0;
-	for (int kind = 0; kind < 2; ++kind) {
-		const F2Field &f = r_law.field[kind];
-		if (!f.solved) {
-			continue;
-		}
-		for (int k = 0; k < g.n; ++k) {
-			const double s = w.M[kind][k] * r_law.wts[kind] * w.Ac[k];
-			const double p1 = f.t1[k] * s;
-			const double px = (f.tx[k] - cxg * f.t1[k]) * s;
-			const double py = (f.ty[k] - cyg * f.t1[k]) * s;
-			kn += p1;
-			kxx += px * (r_law.X[k] - cxg);
-			kxy += px * (r_law.Y[k] - cyg);
-			kyy += py * (r_law.Y[k] - cyg);
-		}
-	}
-	r_law.k_n = kn;
-	// R K R^T with R = [[cr, -sn], [sn, cr]]
-	const double K00 = cr * (cr * kxx - sn * kxy) - sn * (cr * kxy - sn * kyy);
-	const double K01 = cr * (sn * kxx + cr * kxy) - sn * (sn * kxy + cr * kyy);
-	const double K11 = sn * (sn * kxx + cr * kxy) + cr * (sn * kxy + cr * kyy);
-	r_law.kt_y = K00;
-	r_law.kt_x = K11;
-	r_law.kt_xy = K01;
 	r_law.passes = MAX(lub.passes, ns.passes);
 	r_law.settled = lub.settled && ns.settled;
 	// The held slide's memory after this step (rule 6): new contact area takes the current gradient, area weighted; a
@@ -2562,6 +2623,26 @@ bool f2_face_law(const Poly &p_soft, const PartnerSet &p_partners, double p_d0, 
 		r_law.held_out[1] = p_tail->held[1];
 	}
 	r_law.held_out[2] = A_act;
+	if (r_cap != nullptr) {
+		for (int k = 0; k < g.n; ++k) {
+			r_cap->Ac[k] = w.Ac[k];
+			r_cap->R[k] = w.R[k];
+			r_cap->dom[k] = w.dom[k];
+			r_cap->cont[k] = w.cont[k];
+		}
+		r_cap->num_pieces = num_pieces;
+		for (int i = 0; i < num_pieces; ++i) {
+			copy_poly(pieces[i], r_cap->pieces[i]);
+		}
+		r_cap->d0 = p_d0;
+		r_cap->gxg = gx;
+		r_cap->gyg = gy;
+		r_cap->kg = w.kg;
+		r_cap->h = w.h;
+		r_cap->E = w.E;
+		r_cap->A_act = A_act;
+		r_cap->has_held = has_held;
+	}
 	r_law.empty = false;
 	return true;
 }
@@ -2589,6 +2670,509 @@ double f2_edge_distance(const F2Law &p_law, double p_mx, double p_my) {
 		out += p_law.wts[kind] * best;
 	}
 	return out;
+}
+
+// ---------------------------------------------------------------------------------- the face law kept across steps
+// Soft fix B (P5; the header's JoltSoftFaceReuseCache says when a step reuses it). The soft fix desk (softfix/DESK.md 2)
+// replayed it over every traced step of the pick and place's grip; the critique (CRITIQUE.md B) set the per-space step,
+// the drop on a rebuild, the held tolerance and the check switch.
+
+constexpr double F2_REUSE_SHAPE = 1e-4; // mm: the soft face's largest miss of its rigid fit onto the kept one's
+// The held slide's memory's change a reuse allows (turned into the kept law's frame), relative to the memory the kept law
+// read, its size taken as at least F2_REUSE_HELD_FLOOR of gradient (mm per mm): the values the desk's sweeps were run at
+// (held eps 3e-3, softfix/desk/out/p5_sweep3.txt)
+constexpr double F2_REUSE_HELD = 3e-3;
+constexpr double F2_REUSE_HELD_FLOOR = 1e-6;
+// CRUMB_SOFT_FACE_REUSE_CHECK: the desk's bound on a reuse whose contact sets hold, at the 8 um slide limit (|dF| at most
+// the slide times 5e-4 of F per um; the centre moves at most the slide), and the force below which a contact is light
+constexpr double F2_CHECK_DF = 4e-3;
+constexpr double F2_CHECK_C = 8e-3; // mm
+constexpr double F2_CHECK_LIGHT = 500.0; // 0.5 N
+
+struct F2Reuse {
+	bool valid = false; // the kept law may be reused: it settled and it read a held slide's memory
+	uint32_t step = 0; // the cache step it was last written in (0: never)
+	int reuses = 0; // reuses in a row since it was built
+	F2Law build; // the law as built
+	F2Law out; // the law a reuse hands out: the build's cells, their pressures, places, tangents, figures and memory rewritten
+	F2Capture cap; // what the build left for a reuse
+	Poly soft; // the soft face the build read (counter-clockwise, its caller frame)
+	PartnerSet partners; // and the partner's faces
+	int num_over = 0;
+	Poly over[MAX_PARTNERS]; // the soft face's overlap with each partner face at the build
+	double held_in[2] = { 0.0, 0.0 }; // the held slide's memory the build read (its caller frame)
+	uint32_t words[2 * F2_TAIL_WORDS]; // the contact sets the kept law writes into the tail
+	float held_written[3] = { 0.0f, 0.0f, 0.0f }; // and the held slide's memory, as the tail keeps it
+	double E = 0.0, K = 0.0, h = 0.0, mu = 0.0;
+	double F_last = 0.0; // the force handed out last step (the check's step-to-step change)
+};
+
+// r_dst takes p_src's figures, grid and the cells in use (the out law starts as the build)
+void f2_copy_law(const F2Law &p_src, F2Law &r_dst) {
+	r_dst.empty = p_src.empty;
+	r_dst.F = p_src.F;
+	r_dst.cx = p_src.cx;
+	r_dst.cy = p_src.cy;
+	r_dst.r_s = p_src.r_s;
+	r_dst.m1x = p_src.m1x;
+	r_dst.m1y = p_src.m1y;
+	r_dst.area = p_src.area;
+	r_dst.Ixx = p_src.Ixx;
+	r_dst.Iyy = p_src.Iyy;
+	r_dst.J_p = p_src.J_p;
+	r_dst.k_n = p_src.k_n;
+	r_dst.kt_x = p_src.kt_x;
+	r_dst.kt_y = p_src.kt_y;
+	r_dst.kt_xy = p_src.kt_xy;
+	for (int i = 0; i < 2; ++i) {
+		r_dst.edge_x[i] = p_src.edge_x[i];
+		r_dst.edge_y[i] = p_src.edge_y[i];
+		r_dst.wts[i] = p_src.wts[i];
+	}
+	r_dst.Phi = p_src.Phi;
+	r_dst.rot = p_src.rot;
+	r_dst.passes = p_src.passes;
+	r_dst.settled = p_src.settled;
+	r_dst.A_act = p_src.A_act;
+	for (int i = 0; i < 3; ++i) {
+		r_dst.held_out[i] = p_src.held_out[i];
+	}
+	const F2Grid &gs = p_src.grid;
+	F2Grid &gd = r_dst.grid;
+	gd.nx = gs.nx;
+	gd.ny = gs.ny;
+	gd.n = gs.n;
+	gd.m = gs.m;
+	gd.y_fast = gs.y_fast;
+	memcpy(gd.xe, gs.xe, sizeof(double) * (gs.nx + 1));
+	memcpy(gd.ye, gs.ye, sizeof(double) * (gs.ny + 1));
+	const int n = gs.n;
+	memcpy(r_dst.X, p_src.X, sizeof(double) * n);
+	memcpy(r_dst.Y, p_src.Y, sizeof(double) * n);
+	memcpy(r_dst.DX, p_src.DX, sizeof(double) * n);
+	memcpy(r_dst.DY, p_src.DY, sizeof(double) * n);
+	for (int kind = 0; kind < 2; ++kind) {
+		const F2Field &fs = p_src.field[kind];
+		F2Field &fd = r_dst.field[kind];
+		fd.solved = fs.solved;
+		fd.any = fs.any;
+		fd.settled = fs.settled;
+		fd.passes = fs.passes;
+		memcpy(fd.active, fs.active, sizeof(bool) * n);
+		memcpy(fd.p, fs.p, sizeof(double) * n);
+		memcpy(fd.t1, fs.t1, sizeof(double) * n);
+		memcpy(fd.tx, fs.tx, sizeof(double) * n);
+		memcpy(fd.ty, fs.ty, sizeof(double) * n);
+	}
+}
+
+// Keeps a law just built into r_e.build (its capture in r_e.cap): what it read, and what it will write into the tail
+void f2_reuse_store(F2Reuse &r_e, const Poly &p_soft_ccw, const PartnerSet &p_partners_ccw, const F2Tail &p_tail, double p_E, double p_K, double p_h, double p_mu) {
+	const F2Law &b = r_e.build;
+	r_e.valid = b.settled && r_e.cap.has_held; // a set the cap stopped, or no held memory yet (rule 6's first step): never reused
+	r_e.reuses = 0;
+	f2_copy_law(b, r_e.out);
+	copy_poly(p_soft_ccw, r_e.soft);
+	r_e.partners.n = p_partners_ccw.n;
+	r_e.num_over = 0;
+	for (int i = 0; i < p_partners_ccw.n; ++i) {
+		copy_poly(p_partners_ccw.face[i], r_e.partners.face[i]);
+		clip_convex(p_soft_ccw, p_partners_ccw.face[i], r_e.over[r_e.num_over]);
+		if (r_e.over[r_e.num_over].n >= 3) {
+			++r_e.num_over;
+		}
+	}
+	r_e.held_in[0] = p_tail.has_held ? p_tail.held[0] : 0.0;
+	r_e.held_in[1] = p_tail.has_held ? p_tail.held[1] : 0.0;
+	memset(r_e.words, 0, sizeof(r_e.words));
+	for (int kind = 0; kind < 2; ++kind) {
+		const F2Field &f = b.field[kind];
+		if (!f.solved) {
+			continue;
+		}
+		for (int k = 0; k < b.grid.n; ++k) {
+			if (f.active[k]) {
+				r_e.words[kind * F2_TAIL_WORDS + (k >> 5)] |= 1u << (k & 31);
+			}
+		}
+	}
+	for (int i = 0; i < 3; ++i) {
+		r_e.held_written[i] = float(b.held_out[i]);
+	}
+	r_e.E = p_E;
+	r_e.K = p_K;
+	r_e.h = p_h;
+	r_e.mu = p_mu;
+}
+
+// The reuse: REUSED with r_e.out the law at this step's arguments, else why the law is built. p_soft and p_partners
+// counter-clockwise, in this step's caller frame; p_limit the slide limit (mm).
+JoltSoftFaceReuseCache::Outcome f2_face_reuse(F2Reuse &r_e, const Poly &p_soft, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, const F2Tail &p_tail, double p_E, double p_K, double p_h, double p_mu, double p_limit) {
+	typedef JoltSoftFaceReuseCache C;
+	if (!r_e.valid) {
+		return C::BUILT_UNSETTLED;
+	}
+	if (p_E != r_e.E || p_K != r_e.K || p_h != r_e.h || p_mu != r_e.mu || p_soft.n != r_e.soft.n || p_partners.n != r_e.partners.n) {
+		return C::BUILT_COUNTS;
+	}
+	for (int i = 0; i < p_partners.n; ++i) {
+		if (p_partners.face[i].n != r_e.partners.face[i].n) {
+			return C::BUILT_COUNTS;
+		}
+	}
+	if (r_e.reuses >= C::REUSE_CAP) {
+		return C::BUILT_CAP;
+	}
+	const F2Law &b = r_e.build;
+	const F2Capture &cap = r_e.cap;
+	// The tail must be the one the kept law wrote last step: its contact sets bit for bit, its grid, its held slide's memory
+	if (p_tail.words == nullptr || p_tail.nx != b.grid.nx || p_tail.ny != b.grid.ny || p_tail.has[0] != b.field[0].solved || !p_tail.has[1] || !p_tail.has_held) {
+		return C::BUILT_TAIL;
+	}
+	for (int i = 0; i < 2 * F2_TAIL_WORDS; ++i) {
+		if (p_tail.words[i] != r_e.words[i]) {
+			return C::BUILT_TAIL;
+		}
+	}
+	for (int i = 0; i < 3; ++i) {
+		if (p_tail.held[i] != double(r_e.held_written[i])) {
+			return C::BUILT_TAIL;
+		}
+	}
+
+	// The rigid turn and shift that carries this step's soft face onto the kept one: x_build = R x_now + t
+	const Poly &soft = p_soft;
+	double ax = 0.0, ay = 0.0, bx = 0.0, by = 0.0;
+	for (int k = 0; k < soft.n; ++k) {
+		ax += soft.x[k];
+		ay += soft.y[k];
+		bx += r_e.soft.x[k];
+		by += r_e.soft.y[k];
+	}
+	ax /= soft.n;
+	ay /= soft.n;
+	bx /= soft.n;
+	by /= soft.n;
+	double hxx = 0.0, hxy = 0.0, hyx = 0.0, hyy = 0.0;
+	for (int k = 0; k < soft.n; ++k) {
+		const double px = soft.x[k] - ax, py = soft.y[k] - ay, qx = r_e.soft.x[k] - bx, qy = r_e.soft.y[k] - by;
+		hxx += px * qx;
+		hxy += px * qy;
+		hyx += py * qx;
+		hyy += py * qy;
+	}
+	const double th = std::atan2(hxy - hyx, hxx + hyy);
+	const double c = std::cos(th), s = std::sin(th);
+	const double tx = bx - (c * ax - s * ay), ty = by - (s * ax + c * ay);
+	auto map = [&](double p_x, double p_y, double &r_x, double &r_y) {
+		r_x = c * p_x - s * p_y + tx;
+		r_y = s * p_x + c * p_y + ty;
+	};
+	for (int k = 0; k < soft.n; ++k) {
+		double mx, my;
+		map(soft.x[k], soft.y[k], mx, my);
+		if (std::hypot(mx - r_e.soft.x[k], my - r_e.soft.y[k]) > F2_REUSE_SHAPE) {
+			return C::BUILT_SHAPE;
+		}
+	}
+
+	// The slide: how far the partner's material moved against the soft face since the build, at the vertices of the
+	// build's overlap (a rigid motion's displacement over a convex region is largest at one of its vertices); the partner
+	// faces' rigid motion fitted from their vertices (every face of a set rides one body), its own change of shape in
+	// projection (its tilt, the poses' float noise) counted as slide too
+	double pax = 0.0, pay = 0.0, pbx = 0.0, pby = 0.0;
+	int pn = 0;
+	for (int i = 0; i < p_partners.n; ++i) {
+		for (int k = 0; k < p_partners.face[i].n; ++k) {
+			double mx, my;
+			map(p_partners.face[i].x[k], p_partners.face[i].y[k], mx, my);
+			pax += r_e.partners.face[i].x[k];
+			pay += r_e.partners.face[i].y[k];
+			pbx += mx;
+			pby += my;
+			++pn;
+		}
+	}
+	pax /= pn;
+	pay /= pn;
+	pbx /= pn;
+	pby /= pn;
+	double qxx = 0.0, qxy = 0.0, qyx = 0.0, qyy = 0.0;
+	for (int i = 0; i < p_partners.n; ++i) {
+		for (int k = 0; k < p_partners.face[i].n; ++k) {
+			double mx, my;
+			map(p_partners.face[i].x[k], p_partners.face[i].y[k], mx, my);
+			const double px = r_e.partners.face[i].x[k] - pax, py = r_e.partners.face[i].y[k] - pay, qx = mx - pbx, qy = my - pby;
+			qxx += px * qx;
+			qxy += px * qy;
+			qyx += py * qx;
+			qyy += py * qy;
+		}
+	}
+	const double ph = std::atan2(qxy - qyx, qxx + qyy);
+	const double pc = std::cos(ph), ps = std::sin(ph);
+	const double ptx = pbx - (pc * pax - ps * pay), pty = pby - (ps * pax + pc * pay);
+	double slide = 0.0;
+	for (int i = 0; i < p_partners.n; ++i) {
+		for (int k = 0; k < p_partners.face[i].n; ++k) {
+			double mx, my;
+			map(p_partners.face[i].x[k], p_partners.face[i].y[k], mx, my);
+			const double fx = pc * r_e.partners.face[i].x[k] - ps * r_e.partners.face[i].y[k] + ptx;
+			const double fy = ps * r_e.partners.face[i].x[k] + pc * r_e.partners.face[i].y[k] + pty;
+			slide = MAX(slide, std::hypot(mx - fx, my - fy));
+		}
+	}
+	double disp = 0.0;
+	for (int i = 0; i < r_e.num_over; ++i) {
+		for (int k = 0; k < r_e.over[i].n; ++k) {
+			const double x = r_e.over[i].x[k], y = r_e.over[i].y[k];
+			disp = MAX(disp, std::hypot(pc * x - ps * y + ptx - x, ps * x + pc * y + pty - y));
+		}
+	}
+	slide += disp;
+	if (slide > p_limit) {
+		return C::BUILT_SLIDE;
+	}
+
+	// The held slide's memory, turned into the build's frame, must be the one the build read
+	const double hgx = c * p_tail.held[0] - s * p_tail.held[1], hgy = s * p_tail.held[0] + c * p_tail.held[1];
+	if (std::hypot(hgx - r_e.held_in[0], hgy - r_e.held_in[1]) > F2_REUSE_HELD * MAX(std::hypot(r_e.held_in[0], r_e.held_in[1]), F2_REUSE_HELD_FLOOR)) {
+		return C::BUILT_HELD;
+	}
+
+	// Every cell of the soft face keeps its class: its centre on the same side of the partner's edges as at the build (a
+	// centre that crossed is a contactable set the law would change)
+	const double rot = b.rot;
+	{
+		const double cgr = std::cos(-rot), sgr = std::sin(-rot);
+		thread_local PartnerSet scratch_now;
+		PartnerSet &now = scratch_now;
+		now.n = p_partners.n;
+		for (int i = 0; i < p_partners.n; ++i) {
+			now.face[i].n = 0;
+			for (int k = 0; k < p_partners.face[i].n; ++k) {
+				double mx, my;
+				map(p_partners.face[i].x[k], p_partners.face[i].y[k], mx, my);
+				now.face[i].push(cgr * mx - sgr * my, sgr * mx + cgr * my);
+			}
+			make_ccw(now.face[i]);
+		}
+		for (int k = 0; k < b.grid.n; ++k) {
+			if (cap.dom[k] && inside_any(now, b.X[k], b.Y[k]) != cap.cont[k]) {
+				return C::BUILT_CELLS;
+			}
+		}
+	}
+
+	// The plane in the build's caller frame, then in its grid's frame, and its change since the build
+	const double gbx = c * p_gx - s * p_gy, gby = s * p_gx + c * p_gy;
+	const double d0b = p_d0 - (gbx * tx + gby * ty);
+	const double cg = std::cos(-rot), sg = std::sin(-rot);
+	const double ggx = cg * gbx - sg * gby, ggy = sg * gbx + cg * gby;
+	const double dd0 = d0b - cap.d0, dgx = ggx - cap.gxg, dgy = ggy - cap.gyg;
+	// The friction share at this step's tau (its other parts read only the kept sets and the build's geometry)
+	double Phi = b.Phi;
+	if (cap.tot_len > 0.0) {
+		double dmax = -1e300;
+		for (int i = 0; i < cap.num_pieces; ++i) {
+			for (int k = 0; k < cap.pieces[i].n; ++k) {
+				dmax = MAX(dmax, d0b + ggx * cap.pieces[i].x[k] + ggy * cap.pieces[i].y[k]);
+			}
+		}
+		const double gn = std::hypot(ggx, ggy);
+		const double tau = dmax > 1e-300 ? gn * cap.h / dmax : 1e9;
+		const double acc = cap.acc_fixed + cap.per_smooth * f2_phi(2, 1.0, p_mu, cap.kg, 0.0, tau);
+		Phi = MIN(MAX(acc / cap.tot_len, 0.0), 1.0);
+	}
+	const bool lub_solved = b.field[0].solved;
+	if ((1.0 - Phi > 1e-12) != lub_solved) {
+		return C::BUILT_PHI;
+	}
+
+	// The out law in this step's caller frame: the grid turned by rot - th, its cells shifted by -R^T t (the build frame's
+	// origin here), each field's tangent to w = X and w = Y shifted with them (the field is linear in w: the tangent to
+	// X + sx is the tangent to X plus sx times the tangent to 1)
+	F2Law &o = r_e.out;
+	o.rot = rot - th;
+	const double ox = -(c * tx + s * ty), oy = -(-s * tx + c * ty);
+	const double cgo = std::cos(-o.rot), sgo = std::sin(-o.rot);
+	const double sgx = cgo * ox - sgo * oy, sgy = sgo * ox + cgo * oy;
+	const F2Grid &g = b.grid;
+	// The fields along their own tangents, and complementarity on every contactable cell (the law's own settle test)
+	for (int kind = 0; kind < 2; ++kind) {
+		const F2Field &bf = b.field[kind];
+		if (!bf.solved) {
+			continue;
+		}
+		const double gam = kind == 1 ? F2_GAMMA_NS : F2_GAMMA_LUB;
+		F2Field &of = o.field[kind];
+		for (int k = 0; k < g.n; ++k) {
+			if (bf.active[k]) {
+				const double p = bf.p[k] + bf.t1[k] * dd0 + bf.tx[k] * dgx + bf.ty[k] * dgy;
+				if (p < 0.0) {
+					return C::BUILT_COMPL;
+				}
+				of.p[k] = p;
+			} else if (cap.cont[k] && cap.dom[k]) {
+				const double q = cap.q0[kind][k] + cap.r1[kind][k] * dd0 + cap.rx[kind][k] * dgx + cap.ry[kind][k] * dgy;
+				const double wk = -(cap.h / (gam * cap.E)) * q;
+				const double dk = d0b + ggx * b.X[k] + ggy * b.Y[k];
+				if (wk < dk) {
+					return C::BUILT_COMPL;
+				}
+			}
+			of.tx[k] = bf.tx[k] + sgx * bf.t1[k];
+			of.ty[k] = bf.ty[k] + sgy * bf.t1[k];
+		}
+	}
+	o.Phi = Phi;
+	o.wts[0] = lub_solved ? 1.0 - Phi : 0.0;
+	o.wts[1] = Phi;
+	thread_local double scratch_pc[F2_MAX_CELLS];
+	thread_local double scratch_m[2][F2_MAX_CELLS];
+	double *pcell = scratch_pc;
+	double(*mpost)[F2_MAX_CELLS] = scratch_m;
+	for (int k = 0; k < g.n; ++k) {
+		o.X[k] = b.X[k] + sgx;
+		o.Y[k] = b.Y[k] + sgy;
+		// the cell's pressure and the fields' multipliers as the law makes them: summed, then reshaped
+		double v = 0.0;
+		for (int kind = 0; kind < 2; ++kind) {
+			if (o.field[kind].solved) {
+				v += o.wts[kind] * cap.Mpre[kind][k] * o.field[kind].p[k];
+			}
+			mpost[kind][k] = cap.Mpre[kind][k] * cap.R[k];
+		}
+		pcell[k] = v * cap.R[k];
+	}
+	if (!f2_figures(o, cap.Ac, pcell, mpost)) {
+		return C::BUILT_FIGURES;
+	}
+	// The held slide's memory after this step, as the law leaves it (rule 6), with the kept contact's area
+	const double A_act = cap.A_act;
+	if (A_act > p_tail.held[2]) {
+		const double wt = p_tail.held[2] / A_act;
+		o.held_out[0] = wt * p_tail.held[0] + (1.0 - wt) * p_gx;
+		o.held_out[1] = wt * p_tail.held[1] + (1.0 - wt) * p_gy;
+	} else {
+		o.held_out[0] = p_tail.held[0];
+		o.held_out[1] = p_tail.held[1];
+	}
+	o.held_out[2] = A_act;
+	for (int i = 0; i < 3; ++i) {
+		r_e.held_written[i] = float(o.held_out[i]);
+	}
+	++r_e.reuses;
+	return C::REUSED;
+}
+
+// CRUMB_SOFT_FACE_REUSE_CHECK: the law built beside a reuse, into scratch the patch never reads, held against it
+void f2_reuse_check(const F2Reuse &p_e, JoltSoftFaceReuseCache &r_cache, const Poly &p_soft, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, double p_E, double p_K, double p_h, double p_mu, const F2Tail &p_tail) {
+	thread_local F2Law scratch_check;
+	F2Law &L = scratch_check;
+	const F2Law &o = p_e.out;
+	JoltSoftFaceReuseCache::CheckStats &st = r_cache.check_stats;
+	++st.checked;
+	if (!(f2_face_law(p_soft, p_partners, p_d0, p_gx, p_gy, p_E, p_K, p_h, p_mu, F2_EDGE_TOL, &p_tail, L) && !L.empty)) {
+		// the law presses nothing where the reuse pressed: its sets differ, the whole force in error
+		++st.differ;
+		st.differ_df_max = MAX(st.differ_df_max, 1.0);
+		return;
+	}
+	const double df = std::abs(o.F - L.F);
+	if (L.F < F2_CHECK_LIGHT) {
+		++st.light;
+		st.light_df_max = MAX(st.light_df_max, df);
+		return;
+	}
+	const double rel = df / L.F;
+	const double dc = std::hypot(o.cx - L.cx, o.cy - L.cy);
+	double arm = 0.0;
+	for (int d = 0; d < 4; ++d) {
+		const double ang = d * PI / 2.0;
+		const double mx = std::cos(ang), my = std::sin(ang);
+		arm = MAX(arm, std::abs(f2_edge_distance(o, mx, my) - f2_edge_distance(L, mx, my)));
+	}
+	bool same = o.grid.nx == L.grid.nx && o.grid.ny == L.grid.ny;
+	for (int kind = 0; kind < 2 && same; ++kind) {
+		if (o.field[kind].solved != L.field[kind].solved) {
+			same = false;
+		} else if (o.field[kind].solved) {
+			for (int k = 0; k < o.grid.n && same; ++k) {
+				same = o.field[kind].active[k] == L.field[kind].active[k];
+			}
+		}
+	}
+	if (same) {
+		++st.agree;
+		const double nt = std::sqrt(L.kt_x * L.kt_x + L.kt_y * L.kt_y + 2.0 * L.kt_xy * L.kt_xy);
+		const double dkx = o.kt_x - L.kt_x, dky = o.kt_y - L.kt_y, dkxy = o.kt_xy - L.kt_xy;
+		const double kt = nt > 0.0 ? std::sqrt(dkx * dkx + dky * dky + 2.0 * dkxy * dkxy) / nt : 0.0;
+		st.agree_df_max = MAX(st.agree_df_max, rel);
+		st.agree_c_max = MAX(st.agree_c_max, dc);
+		st.agree_arm_max = MAX(st.agree_arm_max, arm);
+		st.agree_kt_max = MAX(st.agree_kt_max, kt);
+		if (rel > F2_CHECK_DF || dc > F2_CHECK_C) {
+			++st.agree_over;
+		}
+	} else {
+		++st.differ;
+		st.differ_df_max = MAX(st.differ_df_max, rel);
+		st.differ_c_max = MAX(st.differ_c_max, dc);
+		st.differ_arm_max = MAX(st.differ_arm_max, arm);
+		st.differ_within_step += df <= std::abs(L.F - p_e.F_last) ? 1 : 0;
+		st.differ_within_build += df <= std::abs(L.F - p_e.build.F) ? 1 : 0;
+	}
+}
+
+// The face law through the kept entry: reused when it may be, else built into the entry (with its capture) and kept.
+// r_law: the law the patch reads. False when the patch presses nothing. With the reuse off the builder never comes here,
+// and every step builds the law exactly as before.
+bool f2_face_cached(F2Reuse &r_e, JoltSoftFaceReuseCache &r_cache, const Poly &p_soft, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, double p_E, double p_K, double p_h, double p_mu, const F2Tail &p_tail, bool p_onset_pending, F2Law *&r_law) {
+	typedef JoltSoftFaceReuseCache C;
+	const uint32_t step = r_cache.get_step();
+	const bool twice = r_e.step == step;
+	const bool last = r_e.step != 0 && r_e.step + 1 == step;
+	r_e.step = step;
+	thread_local Poly scratch_soft;
+	thread_local PartnerSet scratch_partners;
+	Poly &soft = scratch_soft;
+	PartnerSet &partners = scratch_partners;
+	copy_poly(p_soft, soft);
+	make_ccw(soft);
+	partners.n = p_partners.n;
+	for (int i = 0; i < p_partners.n; ++i) {
+		copy_poly(p_partners.face[i], partners.face[i]);
+		make_ccw(partners.face[i]);
+	}
+	C::Outcome why;
+	if (twice) {
+		why = C::BUILT_TWICE;
+	} else if (!last) {
+		why = C::BUILT_NO_ENTRY;
+	} else if (p_onset_pending) {
+		why = C::BUILT_ONSET;
+	} else {
+		why = f2_face_reuse(r_e, soft, partners, p_d0, p_gx, p_gy, p_tail, p_E, p_K, p_h, p_mu, r_cache.get_slide_limit());
+	}
+	r_cache.count(why);
+	if (why == C::REUSED) {
+		r_law = &r_e.out;
+		if (r_cache.is_checking()) {
+			f2_reuse_check(r_e, r_cache, p_soft, p_partners, p_d0, p_gx, p_gy, p_E, p_K, p_h, p_mu, p_tail);
+		}
+		r_e.F_last = r_e.out.F;
+		return true;
+	}
+	const bool pressed = f2_face_law(p_soft, p_partners, p_d0, p_gx, p_gy, p_E, p_K, p_h, p_mu, F2_EDGE_TOL, &p_tail, r_e.build, &r_e.cap) && !r_e.build.empty;
+	r_law = &r_e.build;
+	if (pressed && !twice) {
+		f2_reuse_store(r_e, soft, partners, p_tail, p_E, p_K, p_h, p_mu);
+	} else {
+		r_e.valid = false;
+	}
+	r_e.F_last = pressed ? r_e.build.F : 0.0;
+	return pressed;
 }
 
 // TABLE_FORMAT.md 6: S = A / (P h), P from the equivalent rectangle of the contact's second moments
@@ -3971,6 +4555,153 @@ void set_face_cores(const Poly &p_overlap, double p_d0, double p_gx, double p_gy
 
 } // namespace
 
+// ---------------------------------------------------------------------------------- the space's kept face laws (P5)
+
+struct JoltSoftFaceReuseEntry {
+	F2Reuse e;
+};
+
+JoltSoftFaceReuseCache::~JoltSoftFaceReuseCache() {
+	if (log && active_steps > 0) {
+		_print("at the end");
+	}
+	for (uint32_t i = 0; i < slots.size(); ++i) {
+		memdelete(slots[i].entry);
+	}
+	for (uint32_t i = 0; i < spare.size(); ++i) {
+		memdelete(spare[i]);
+	}
+}
+
+void JoltSoftFaceReuseCache::configure() {
+	const String um = OS::get_singleton()->get_environment("CRUMB_SOFT_FACE_REUSE_UM");
+	const double limit_um = um.is_empty() ? 8.0 : um.to_float();
+	slide_limit = limit_um > 0.0 ? limit_um * 1e-3 : 0.0;
+	log = OS::get_singleton()->get_environment("CRUMB_SOFT_FACE_REUSE_LOG") == "1";
+	check = OS::get_singleton()->get_environment("CRUMB_SOFT_FACE_REUSE_CHECK") == "1";
+	if (log) {
+		char line[160];
+		snprintf(line, sizeof(line), "CRUMB soft face reuse: slide limit %.3f um%s", slide_limit * 1e3, check ? ", every reuse checked against the law" : "");
+		print_line(String(line));
+	}
+}
+
+void JoltSoftFaceReuseCache::begin_step() {
+	++step;
+	active_now = false;
+}
+
+void JoltSoftFaceReuseCache::end_step() {
+	// an entry untouched in this step leaves (its room kept for the next new pair); the others keep their order
+	uint32_t keep = 0;
+	for (uint32_t i = 0; i < slots.size(); ++i) {
+		if (slots[i].touched == step) {
+			slots[keep++] = slots[i];
+		} else {
+			spare.push_back(slots[i].entry);
+		}
+	}
+	slots.resize(keep);
+	if (active_now) {
+		++active_steps;
+		if (log && active_steps % 2000 == 0) {
+			_print("every 2000 steps");
+		}
+	}
+}
+
+void JoltSoftFaceReuseCache::clear() {
+	if (log && active_steps > 0) {
+		_print("at a rebuild");
+	}
+	for (uint32_t i = 0; i < slots.size(); ++i) {
+		memdelete(slots[i].entry);
+	}
+	for (uint32_t i = 0; i < spare.size(); ++i) {
+		memdelete(spare[i]);
+	}
+	slots.clear();
+	spare.clear();
+	for (int i = 0; i < OUTCOME_MAX; ++i) {
+		outcomes[i] = 0;
+	}
+	check_stats = CheckStats();
+	reused_once = false;
+	active_steps = 0;
+	active_now = false;
+}
+
+JoltSoftFaceReuseEntry *JoltSoftFaceReuseCache::touch(const Key &p_key) {
+	if (!is_enabled()) {
+		return nullptr;
+	}
+	active_now = true;
+	for (uint32_t i = 0; i < slots.size(); ++i) {
+		if (slots[i].key == p_key) {
+			slots[i].touched = step;
+			return slots[i].entry;
+		}
+	}
+	JoltSoftFaceReuseEntry *entry;
+	if (!spare.is_empty()) {
+		entry = spare[spare.size() - 1];
+		spare.resize(spare.size() - 1);
+	} else {
+		entry = memnew(JoltSoftFaceReuseEntry);
+	}
+	entry->e.valid = false;
+	entry->e.step = 0;
+	entry->e.reuses = 0;
+	Slot slot;
+	slot.key = p_key;
+	slot.entry = entry;
+	slot.touched = step;
+	slots.push_back(slot);
+	return entry;
+}
+
+void JoltSoftFaceReuseCache::count(Outcome p_outcome) {
+	++outcomes[p_outcome];
+	if (p_outcome == REUSED && !reused_once) {
+		reused_once = true;
+		if (log) {
+			char line[96];
+			snprintf(line, sizeof(line), "CRUMB soft face reuse: the first reuse, at the space's step %u", step);
+			print_line(String(line));
+		}
+	}
+}
+
+void JoltSoftFaceReuseCache::_print(const char *p_when) const {
+	uint64_t laws = 0;
+	for (int i = 0; i < OUTCOME_MAX; ++i) {
+		laws += outcomes[i];
+	}
+	char line[1024];
+	snprintf(line, sizeof(line),
+			"CRUMB soft face reuse (%s, space step %u, %u steps with a face law): face laws %llu, reused %llu (%.1f %%); built: no entry %llu, "
+			"twice %llu, onset %llu, unsettled %llu, tail %llu, counts %llu, cap %llu, soft face %llu, slide %llu, held %llu, cells %llu, "
+			"friction share %llu, complementarity %llu, figures %llu",
+			p_when, step, active_steps, (unsigned long long)laws, (unsigned long long)outcomes[REUSED], laws > 0 ? 100.0 * double(outcomes[REUSED]) / double(laws) : 0.0,
+			(unsigned long long)outcomes[BUILT_NO_ENTRY], (unsigned long long)outcomes[BUILT_TWICE], (unsigned long long)outcomes[BUILT_ONSET],
+			(unsigned long long)outcomes[BUILT_UNSETTLED], (unsigned long long)outcomes[BUILT_TAIL], (unsigned long long)outcomes[BUILT_COUNTS],
+			(unsigned long long)outcomes[BUILT_CAP], (unsigned long long)outcomes[BUILT_SHAPE], (unsigned long long)outcomes[BUILT_SLIDE],
+			(unsigned long long)outcomes[BUILT_HELD], (unsigned long long)outcomes[BUILT_CELLS], (unsigned long long)outcomes[BUILT_PHI],
+			(unsigned long long)outcomes[BUILT_COMPL], (unsigned long long)outcomes[BUILT_FIGURES]);
+	print_line(String(line));
+	if (check) {
+		const CheckStats &s = check_stats;
+		snprintf(line, sizeof(line),
+				"CRUMB soft face reuse check: checked %llu; sets agree %llu: |dF|/F max %.3e, centre max %.3f um, tilt arm max %.3f um, tilt stiffness max %.3e, "
+				"over the bound (4e-3, 8 um) %llu; sets differ %llu: |dF|/F max %.3e, centre max %.3f um, tilt arm max %.3f um, within one step's change %llu, "
+				"within the change since the build %llu; light (under 0.5 N) %llu: |dF| max %.3f mN",
+				(unsigned long long)s.checked, (unsigned long long)s.agree, s.agree_df_max, s.agree_c_max * 1e3, s.agree_arm_max * 1e3, s.agree_kt_max,
+				(unsigned long long)s.agree_over, (unsigned long long)s.differ, s.differ_df_max, s.differ_c_max * 1e3, s.differ_arm_max * 1e3,
+				(unsigned long long)s.differ_within_step, (unsigned long long)s.differ_within_build, (unsigned long long)s.light, s.light_df_max);
+		print_line(String(line));
+	}
+}
+
 bool JoltSoftSurface3D::from_params(const PackedFloat32Array &p_params, JoltSoftSurface3D &r_surface, String &r_error) {
 	r_surface = JoltSoftSurface3D();
 	if (p_params.is_empty()) {
@@ -4431,7 +5162,13 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 					tail.held[1] = t->mHeldGradient[1];
 					tail.held[2] = t->mHeldArea;
 				}
-				pressed = f2_face_law(soft_poly, partners, d0, gx, gy, soft.modulus, soft.bulk_modulus, soft.thickness, mu, F2_EDGE_TOL, &tail, *law2) && !law2->empty;
+				// soft fix B (P5): the face law kept across steps, law2 then pointing at the kept law
+				JoltSoftFaceReuseEntry *kept = p_in.face_cache != nullptr ? p_in.face_cache->touch(p_in.face_key) : nullptr;
+				if (kept != nullptr) {
+					pressed = f2_face_cached(kept->e, *p_in.face_cache, soft_poly, partners, d0, gx, gy, soft.modulus, soft.bulk_modulus, soft.thickness, mu, tail, onset_pending, law2);
+				} else {
+					pressed = f2_face_law(soft_poly, partners, d0, gx, gy, soft.modulus, soft.bulk_modulus, soft.thickness, mu, F2_EDGE_TOL, &tail, *law2) && !law2->empty;
+				}
 			} else {
 				pressed = face_law(soft_poly, partners, d0 * share, gx * share, gy * share, co, p_in.tail, *law) && !law->empty;
 			}

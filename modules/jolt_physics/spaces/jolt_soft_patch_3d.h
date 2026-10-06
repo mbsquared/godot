@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/local_vector.h"
 #include "core/variant/variant.h"
 
 #include "Jolt/Jolt.h"
@@ -131,6 +132,109 @@ struct JoltSoftBuildResult {
 	double m1[2] = { 0.0, 0.0 }; // the field's first moments along the patch axes
 };
 
+// CRUMB (soft fix B, P5): the face law kept across steps. A face patch's law is rebuilt from scratch every step, and in a
+// steady grip almost nothing it reads changes from one step to the next. Each Face patch of a Layer against a partner that
+// is not a Layer keeps the law it last built, keyed by its manifold's bodies and sub shapes (ids, never addresses). While
+// the patch's contact sets hold, the law at this step's plane is the kept one plus its tangent pressures times the plane's
+// change (the fields are linear in the interference for a held set), so a step whose soft face moved rigidly, whose
+// partner slid less than the slide limit against it, whose held slide's memory is the kept one's and whose cells keep
+// their classes reuses it: its pressures moved along their own tangents, complementarity checked on every contactable
+// cell, the friction share read again at this step's tau, the figures made by the law's own figure block in this step's
+// frame, and the held slide's memory updated as the law updates it. Anything else rebuilds (see f2_face_reuse), as does
+// the 33rd reuse in a row, a first touch still to be decided, and a tail other than the one the kept law wrote. An entry
+// untouched for a step is dropped when the step ends; a rebuild of the space drops them all. The physics thread alone
+// reads and writes it (soft contacts need single-threaded Jolt).
+// Switches, read when a world is made: CRUMB_SOFT_FACE_REUSE_UM, the slide limit in micrometres (default 8; 0 turns the
+// reuse off and every step builds the law as before); CRUMB_SOFT_FACE_REUSE_LOG=1 prints the counts; CRUMB_SOFT_FACE_REUSE_CHECK=1
+// also builds the law beside every reuse, into scratch the patch never reads, and prints how far the reuse was from it.
+struct JoltSoftFaceReuseEntry; // the builder's own (jolt_soft_patch_3d.cpp)
+
+class JoltSoftFaceReuseCache {
+public:
+	struct Key {
+		uint32_t body1 = 0;
+		uint32_t sub1 = 0;
+		uint32_t body2 = 0;
+		uint32_t sub2 = 0;
+
+		bool operator==(const Key &p_other) const { return body1 == p_other.body1 && sub1 == p_other.sub1 && body2 == p_other.body2 && sub2 == p_other.sub2; }
+	};
+
+	// What each face law call did: reused, or built and why
+	enum Outcome {
+		REUSED,
+		BUILT_NO_ENTRY, // new, or not written in the last step
+		BUILT_TWICE, // a second call for one manifold in one step (kept no longer)
+		BUILT_ONSET, // the first touch is still to be decided
+		BUILT_UNSETTLED, // the kept law's sets did not settle, or it had no held slide's memory
+		BUILT_TAIL, // the tail is not the one the kept law wrote
+		BUILT_COUNTS, // the material, the friction or a face's vertex count changed
+		BUILT_CAP, // reused REUSE_CAP times in a row
+		BUILT_SHAPE, // the soft face is not the kept one moved rigidly
+		BUILT_SLIDE, // the partner slid more than the limit against it
+		BUILT_HELD, // the held slide's memory is not the kept one's
+		BUILT_CELLS, // a contactable cell changed class
+		BUILT_PHI, // the frictionless field's solve flips
+		BUILT_COMPL, // complementarity fails on a contactable cell
+		BUILT_FIGURES, // the reused figures press nothing
+		OUTCOME_MAX,
+	};
+	static constexpr int REUSE_CAP = 32;
+
+	uint64_t outcomes[OUTCOME_MAX] = {};
+	// CRUMB_SOFT_FACE_REUSE_CHECK: the reuses against the law built beside them, the force at least 0.5 N (light contacts
+	// counted apart). agree: the law's contact sets are the reuse's; differ: they are not.
+	struct CheckStats {
+		uint64_t checked = 0;
+		uint64_t light = 0;
+		double light_df_max = 0.0; // |dF|, solver units
+		uint64_t agree = 0;
+		uint64_t agree_over = 0; // over the desk's bound: |dF| / F above 4e-3 or the centre more than 8 um off
+		double agree_df_max = 0.0, agree_c_max = 0.0, agree_arm_max = 0.0, agree_kt_max = 0.0; // relative, mm, mm, relative
+		uint64_t differ = 0;
+		double differ_df_max = 0.0, differ_c_max = 0.0, differ_arm_max = 0.0;
+		uint64_t differ_within_step = 0; // |dF| no more than the law's own change from the last step's figures
+		uint64_t differ_within_build = 0; // |dF| no more than the law's own change since the kept law was built
+	} check_stats;
+
+	~JoltSoftFaceReuseCache();
+
+	// Reads the switches (a world is made)
+	void configure();
+	bool is_enabled() const { return slide_limit > 0.0; }
+	bool is_checking() const { return check; }
+	double get_slide_limit() const { return slide_limit; } // mm
+	uint32_t get_step() const { return step; }
+
+	// The space's own step counter (never another space's), and the drop of entries untouched in the step
+	void begin_step();
+	void end_step();
+	// Drops every entry (a rebuild of the space: its bodies take the same ids again)
+	void clear();
+	// The entry of one manifold, made when it has none; nullptr when the reuse is off. Marks it touched in this step.
+	JoltSoftFaceReuseEntry *touch(const Key &p_key);
+	// The builder counts each call (and prints the first reuse)
+	void count(Outcome p_outcome);
+
+private:
+	struct Slot {
+		Key key;
+		JoltSoftFaceReuseEntry *entry = nullptr;
+		uint32_t touched = 0;
+	};
+	LocalVector<Slot> slots;
+	LocalVector<JoltSoftFaceReuseEntry *> spare; // dropped entries' room, kept for the next new pair
+	double slide_limit = 0.0;
+	bool log = false;
+	bool check = false;
+	bool reused_once = false;
+	uint32_t step = 0;
+	uint32_t active_steps = 0; // steps with a face law call
+	bool active_now = false;
+
+	void _print(const char *p_when) const;
+};
+
 struct JoltSoftPatchInput {
 	const JPH::Body *body1 = nullptr;
 	const JPH::Body *body2 = nullptr;
@@ -140,6 +244,8 @@ struct JoltSoftPatchInput {
 	float static_friction = 0.0f; // the pair's combined static coefficient
 	float sliding_friction = 0.0f; // the pair's combined kinetic coefficient (never above the static one)
 	const JPH::SoftContactTail *tail = nullptr; // last step's tail of this manifold
+	JoltSoftFaceReuseCache *face_cache = nullptr; // the space's kept face laws (nullptr: built every step)
+	JoltSoftFaceReuseCache::Key face_key; // this manifold's key in it
 };
 
 // Builds one manifold's patch. Returns true with r_patch enabled when the contact is soft this step.
