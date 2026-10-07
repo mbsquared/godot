@@ -180,6 +180,9 @@ public:
 		OUTCOME_MAX,
 	};
 	static constexpr int REUSE_CAP = 32;
+	// Dropped entries kept for the next new pair, at most (each entry is sized for the largest grid, about 325 KB); the
+	// rest are freed when they drop, so a space holds its live face pairs' entries and no more than this many besides
+	static constexpr uint32_t SPARE_MAX = 4;
 
 	uint64_t outcomes[OUTCOME_MAX] = {};
 	// CRUMB_SOFT_FACE_REUSE_CHECK: the reuses against the law built beside them, the force at least 0.5 N (light contacts
@@ -197,7 +200,12 @@ public:
 		uint64_t differ_within_build = 0; // |dF| no more than the law's own change since the kept law was built
 	} check_stats;
 
+	JoltSoftFaceReuseCache() = default;
 	~JoltSoftFaceReuseCache();
+	// It owns its entries (raw pointers, freed by clear() and the destructor), so it is never copied: a copy would free
+	// them twice
+	JoltSoftFaceReuseCache(const JoltSoftFaceReuseCache &) = delete;
+	JoltSoftFaceReuseCache &operator=(const JoltSoftFaceReuseCache &) = delete;
 
 	// Reads the switches (a world is made)
 	void configure();

@@ -2806,7 +2806,9 @@ void f2_reuse_store(F2Reuse &r_e, const Poly &p_soft_ccw, const PartnerSet &p_pa
 }
 
 // The reuse: REUSED with r_e.out the law at this step's arguments, else why the law is built. p_soft and p_partners
-// counter-clockwise, in this step's caller frame; p_limit the slide limit (mm).
+// counter-clockwise, in this step's caller frame; p_limit the slide limit (mm). Each limit test is written as
+// !(x <= limit), so that a NaN (a pose or a memory gone bad) rebuilds: x > limit is false on NaN, and such a step
+// reused.
 JoltSoftFaceReuseCache::Outcome f2_face_reuse(F2Reuse &r_e, const Poly &p_soft, const PartnerSet &p_partners, double p_d0, double p_gx, double p_gy, const F2Tail &p_tail, double p_E, double p_K, double p_h, double p_mu, double p_limit) {
 	typedef JoltSoftFaceReuseCache C;
 	if (!r_e.valid) {
@@ -2871,7 +2873,7 @@ JoltSoftFaceReuseCache::Outcome f2_face_reuse(F2Reuse &r_e, const Poly &p_soft, 
 	for (int k = 0; k < soft.n; ++k) {
 		double mx, my;
 		map(soft.x[k], soft.y[k], mx, my);
-		if (std::hypot(mx - r_e.soft.x[k], my - r_e.soft.y[k]) > F2_REUSE_SHAPE) {
+		if (!(std::hypot(mx - r_e.soft.x[k], my - r_e.soft.y[k]) <= F2_REUSE_SHAPE)) {
 			return C::BUILT_SHAPE;
 		}
 	}
@@ -2930,13 +2932,13 @@ JoltSoftFaceReuseCache::Outcome f2_face_reuse(F2Reuse &r_e, const Poly &p_soft, 
 		}
 	}
 	slide += disp;
-	if (slide > p_limit) {
+	if (!(slide <= p_limit)) {
 		return C::BUILT_SLIDE;
 	}
 
 	// The held slide's memory, turned into the build's frame, must be the one the build read
 	const double hgx = c * p_tail.held[0] - s * p_tail.held[1], hgy = s * p_tail.held[0] + c * p_tail.held[1];
-	if (std::hypot(hgx - r_e.held_in[0], hgy - r_e.held_in[1]) > F2_REUSE_HELD * MAX(std::hypot(r_e.held_in[0], r_e.held_in[1]), F2_REUSE_HELD_FLOOR)) {
+	if (!(std::hypot(hgx - r_e.held_in[0], hgy - r_e.held_in[1]) <= F2_REUSE_HELD * MAX(std::hypot(r_e.held_in[0], r_e.held_in[1]), F2_REUSE_HELD_FLOOR))) {
 		return C::BUILT_HELD;
 	}
 
@@ -4592,13 +4594,16 @@ void JoltSoftFaceReuseCache::begin_step() {
 }
 
 void JoltSoftFaceReuseCache::end_step() {
-	// an entry untouched in this step leaves (its room kept for the next new pair); the others keep their order
+	// an entry untouched in this step leaves (its room kept for the next new pair, up to SPARE_MAX rooms, the rest freed);
+	// the others keep their order
 	uint32_t keep = 0;
 	for (uint32_t i = 0; i < slots.size(); ++i) {
 		if (slots[i].touched == step) {
 			slots[keep++] = slots[i];
-		} else {
+		} else if (spare.size() < SPARE_MAX) {
 			spare.push_back(slots[i].entry);
+		} else {
+			memdelete(slots[i].entry);
 		}
 	}
 	slots.resize(keep);
