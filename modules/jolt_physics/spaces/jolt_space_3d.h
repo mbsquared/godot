@@ -101,6 +101,8 @@ public:
 		SOFT_COUNT_NO_TAIL, // soft contacts kept rigid: the manifold reserved no tail
 		SOFT_COUNT_SOLID_FACE, // Solid face pairs, rigid by design
 		SOFT_COUNT_UNCLASSED, // pairs the builder could not class (or whose footprints miss): rigid
+		SOFT_COUNT_PROFILED, // Lines built with their curved side's profile (PHY-18)
+		SOFT_COUNT_PROFILE_AT_END, // of those, Lines whose loaded interval reached an end of the line
 		SOFT_COUNT_MAX,
 	};
 
@@ -113,6 +115,7 @@ private:
 	bool soft_rigid_warned = false;
 	bool soft_overflow_reported = false;
 	bool soft_shear_enabled = true;
+	bool soft_solid_creep_enabled = true;
 
 	// The last step's patch figures, kept only with physics/jolt_physics_3d/debug/soft_patch_figures on: fixed-size records
 	// in room that grows only when a step has more patches than any before, so a step allocates nothing once warm
@@ -197,6 +200,8 @@ public:
 	bool soft_surfaces_supported() const;
 	bool are_soft_contacts_enabled() const { return soft_contacts_enabled; }
 	bool is_soft_shear_enabled() const { return soft_shear_enabled; }
+	// A Solid line rolls with creep (PHY-17); CRUMB_SOFT_SOLID_CREEP=0 keeps its rigid stick
+	bool is_soft_solid_creep_enabled() const { return soft_solid_creep_enabled; }
 	// The kept face laws (physics thread only, inside the step)
 	JoltSoftFaceReuseCache *get_soft_face_cache() { return &soft_face_cache; }
 	void count_soft_contact(SoftCount p_count) { soft_counts[p_count].increment(); }

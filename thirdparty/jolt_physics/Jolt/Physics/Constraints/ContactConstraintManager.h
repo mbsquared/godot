@@ -596,6 +596,7 @@ private:
 		bool					mDecided;							// the first touch was decided this step (OnsetPending clears)
 		bool					mGap;								// nothing presses at the start of the step
 		bool					mRigidStick;
+		bool					mBoundRelaxDamping;					// the friction rows' damping is bounded by the step's relaxation (SoftContactPatch)
 		bool					mFrictionFixed;						// the friction rows were applied as fixed impulses
 		bool					mSliding;							// the friction block was projected onto the ellipse
 		bool					mWarm;								// last step solved this patch: its tail's impulses warm start the rows

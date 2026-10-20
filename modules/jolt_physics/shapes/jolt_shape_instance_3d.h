@@ -120,6 +120,8 @@ public:
 	}
 
 	bool is_soft() const { return soft_surface.kind != JoltSoftSurface3D::KIND_NONE; }
+	// PHY-18: a side profile, which a rigid shape's record of kind none may carry onto a soft partner (never soft itself)
+	bool has_side_profile() const { return soft_surface.profile_count > 0; }
 	const JoltSoftSurface3D &get_soft_surface() const { return soft_surface; }
 	void set_soft_surface(const JoltSoftSurface3D &p_surface) { soft_surface = p_surface; }
 

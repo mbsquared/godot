@@ -584,6 +584,7 @@ void JoltBody3D::_shapes_committed() {
 
 	// CRUMB: a removed, replaced or cleared shape takes its soft surface with it
 	_update_soft_shapes();
+	_update_profiled_shapes();
 	_update_mass_properties();
 	_update_joint_constraints();
 	wake_up();
@@ -1132,8 +1133,17 @@ void JoltBody3D::set_shape_soft_surface(int p_index, const JoltSoftSurface3D &p_
 
 	shapes[p_index].set_soft_surface(p_surface);
 	_update_soft_shapes();
+	_update_profiled_shapes();
 
 	wake_up();
+}
+
+void JoltBody3D::_update_profiled_shapes() {
+	bool profiled = false;
+	for (const JoltShapeInstance3D &shape : shapes) {
+		profiled = profiled || (!shape.is_soft() && shape.has_side_profile());
+	}
+	shape_profiled = profiled;
 }
 
 void JoltBody3D::_update_soft_shapes() {
@@ -1159,7 +1169,7 @@ void JoltBody3D::_update_soft_shapes() {
 }
 
 const JoltSoftSurface3D *JoltBody3D::get_contact_soft_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id) const {
-	if (!shape_soft) {
+	if (!shape_soft && !shape_profiled) {
 		return nullptr;
 	}
 
@@ -1169,7 +1179,7 @@ const JoltSoftSurface3D *JoltBody3D::get_contact_soft_surface(const JPH::Body &p
 	}
 
 	const JoltShapeInstance3D &shape = shapes[index];
-	return shape.is_soft() ? &shape.get_soft_surface() : nullptr;
+	return shape.is_soft() || shape.has_side_profile() ? &shape.get_soft_surface() : nullptr;
 }
 
 void JoltBody3D::set_contact_force_tracking(bool p_enable) {

@@ -77,14 +77,28 @@
 //   two layers in series. Where a side is outside the table, the side with the larger local share reads its own law at
 //   that share (counted as outside the table).
 // - Solid: Hertz at a point, the line law of design 2.3 (UNSOURCED constants) along a line; a Solid face pair stays
-//   rigid (counted).
+//   rigid (counted). A Solid line rolls with creep (PHY-17): each loaded slice a strip of Carter's rolling line contact,
+//   its creep stiffness (pi/2) E* (b_i / bmax) dy on the one relaxation length bmax, summed into the shear stiffness and
+//   taken about the centre into the spin stiffness, so the compliant, relaxing friction block gives the brush law
+//   F = k sigma v / V, its damping bounded by the step's relaxation; CRUMB_SOFT_SOLID_CREEP=0 keeps the rigid stick it
+//   had before. The coefficient is the longitudinal one, so the lateral creep, on the same shear stiffness, is
+//   1 / (1 - nu) too stiff until the block has a stiffness per tangent. A Solid point keeps its rigid stick.
 // - Lumped: F = K_l d with the class's bed-of-springs profile.
 // Each patch also carries its first-touch law as samples of its own pressed law (the solver reads them piecewise), the
 // point where a first touch solved as an impact acts (a Line: the centroid of the overlap one speculative band deeper
 // than its deepest point), and its core points (a face's overlap vertices, a Line's loaded ends, a Point's deepest point).
+// A side profile (PHY-18): a cylinder's side need not be straight. Its record may carry the gap g(Y) >= 0 below the
+// cylinder's radius at ascending stations of the cylinder's own Y (a crown, a flat with shoulders, a draft, any convex or
+// stepped running surface), linear between them and held at the end values beyond. Where a Line's curved side is a
+// cylinder with one, every squash along the line is s0 + camber y - g, the slices span the loaded interval, the deepest
+// point is the exact maximum over the stations and the ends, and a third core guards it; a record of kind none carries a
+// rigid side's profile onto a soft partner. Without one, every statement is the straight side's, bit for bit.
 // Units are the solver's: millimetres, kilograms, seconds (a force of 1 N is 1000).
 
 class JoltBody3D;
+
+// The most stations a side profile carries (fixed, so a record never allocates)
+constexpr int JOLT_SIDE_PROFILE_MAX = 32;
 
 // One shape's soft surface as the host sends it (PhysicsServer3D::body_set_shape_soft_surface), in solver units
 struct JoltSoftSurface3D {
@@ -106,6 +120,12 @@ struct JoltSoftSurface3D {
 	double restitution = 0.0; // sqrt(resilience)
 	double sliding_friction = -1.0; // the kinetic coefficient; negative: the static one
 	double rolling_arm = 0.0; // the measured rolling resistance arm, added to the layer's (appended, F13b)
+	// The side profile (appended, PHY-18): profile_count stations (0: a straight side), profile_y strictly ascending in
+	// the cylinder's own unscaled Y, profile_g the gap below its radius there. Read only where a Line's curved side is a
+	// cylinder; a record of kind none may carry one (a rigid side's profile, never counted soft).
+	int profile_count = 0;
+	float profile_y[JOLT_SIDE_PROFILE_MAX] = {};
+	float profile_g[JOLT_SIDE_PROFILE_MAX] = {};
 
 	// Reads the parameter array; false with r_error when it cannot be a soft surface (an empty array is KIND_NONE)
 	static bool from_params(const PackedFloat32Array &p_params, JoltSoftSurface3D &r_surface, String &r_error);
@@ -130,6 +150,13 @@ struct JoltSoftBuildResult {
 	double face_ratio = 1.0; // the face condition's ratio applied (T3), 1 when none
 	double raw_force = 0.0; // the field's force before the face ratio
 	double m1[2] = { 0.0, 0.0 }; // the field's first moments along the patch axes
+	// A Line built with its curved side's profile (PHY-18): the loaded interval [y_lo, y_hi] along the patch's tangent 2
+	// (empty: y_lo > y_hi), whether it reached an end of the line, and the deepest point's y
+	bool profiled = false;
+	bool profile_at_end = false;
+	double y_lo = 0.0;
+	double y_hi = 0.0;
+	double y_deep = 0.0;
 };
 
 // CRUMB (soft fix B, P5): the face law kept across steps. A face patch's law is rebuilt from scratch every step, and in a
@@ -254,6 +281,7 @@ struct JoltSoftPatchInput {
 	const JPH::SoftContactTail *tail = nullptr; // last step's tail of this manifold
 	JoltSoftFaceReuseCache *face_cache = nullptr; // the space's kept face laws (nullptr: built every step)
 	JoltSoftFaceReuseCache::Key face_key; // this manifold's key in it
+	bool solid_creep = false; // a Solid line rolls with creep (PHY-17; the space's switch); false: its rigid stick
 };
 
 // Builds one manifold's patch. Returns true with r_patch enabled when the contact is soft this step.
@@ -261,5 +289,5 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 
 // The patch figures as space_debug_soft_patch returns them (documented at JoltPhysicsServer3D::space_debug_soft_patch),
 // written into r_figures (JOLT_SOFT_PATCH_FIGURES floats); no allocation
-constexpr int JOLT_SOFT_PATCH_FIGURES = 40;
+constexpr int JOLT_SOFT_PATCH_FIGURES = 44;
 void jolt_soft_patch_debug_figures(const JPH::SoftContactPatch &p_patch, const JPH::Vec3 &p_normal, const JoltSoftBuildResult &p_result, int p_kind, float *r_figures);

@@ -127,6 +127,11 @@ private:
 	// a shape removed, replaced or cleared)
 	void _update_soft_shapes();
 
+	// CRUMB (PHY-18): at least one shape carries a side profile in a record of kind none (a rigid side's profile, read by a
+	// soft partner's patch). It never makes the body soft: no compliant flag, manifold reduction as before.
+	bool shape_profiled = false;
+	void _update_profiled_shapes();
+
 	// CRUMB: the contact-force read. One slot per shape, written by the contact listener after each
 	// velocity solve with what the solve applied (impulses, the moment about the centre of mass, the
 	// pressing impulse, the pressing-weighted sum of contact points, the area and the largest friction
@@ -332,8 +337,8 @@ public:
 	// through the body interface, which invalidates its contact cache).
 	bool has_soft_shapes() const { return shape_soft; }
 	void set_shape_soft_surface(int p_index, const JoltSoftSurface3D &p_surface);
-	// The soft surface of the shape a contact is on, or nullptr when that shape is rigid. Read only, from the
-	// contact listener during the step.
+	// The soft surface of the shape a contact is on, or nullptr when that shape is rigid: a rigid shape's record of kind
+	// none only when it carries a side profile (PHY-18). Read only, from the contact listener during the step.
 	const JoltSoftSurface3D *get_contact_soft_surface(const JPH::Body &p_jolt_body, const JPH::SubShapeID &p_sub_shape_id) const;
 
 	// CRUMB: the contact-force read (see PhysicsServer3D::body_set_contact_force_tracking). Tracking

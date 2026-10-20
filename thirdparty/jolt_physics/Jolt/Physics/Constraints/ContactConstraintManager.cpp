@@ -2475,6 +2475,7 @@ void ContactConstraintManager::SetupSoftPatch(ContactConstraint &ioConstraint, S
 	p.mDecided = false;
 	p.mGap = inPatch.mSquash <= 0.0f;
 	p.mRigidStick = inPatch.mRigidStick || p.mShearStiffness <= 0.0f;
+	p.mBoundRelaxDamping = inPatch.mBoundRelaxDamping;
 	p.mFrictionFixed = false;
 	p.mSliding = false;
 	p.mWarm = inWarm;
@@ -2937,6 +2938,13 @@ bool ContactConstraintManager::FinalizeSoftPatches(const uint32 *inConstraintIdx
 			int friction_index = r == &p.mFriction[0]? 0 : (r == &p.mFriction[1]? 1 : (r == &p.mFriction[2]? 2 : -1));
 			if (friction_index >= 0 && (p.mRelaxE != 1.0f || p.mRelaxPhi != 1.0f))
 			{
+				// A patch that bounds it (a Solid line's rolling creep: its relaxation length is a Hertz half-width, so a
+				// rolling step relaxes most of the deflection): the damped share never resists the relaxation with more than
+				// the deflection's own spring, B (1 - E) <= k h. Past it the preload turns over, and a row whose free-body
+				// mass puts c above k h starts each step on the ellipse from its damping alone and keeps sliding, so the
+				// creep never builds. At the bound the step's force is the brush law's (k L / rolling) v at once
+				if (p.mBoundRelaxDamping && velocity_coefficient * (1.0f - p.mRelaxE) > k * h)
+					velocity_coefficient = k * h / (1.0f - p.mRelaxE);
 				r->mPreload *= 1.0f - velocity_coefficient * (1.0f - p.mRelaxE) / (k * h);
 				velocity_coefficient *= p.mRelaxPhi;
 			}

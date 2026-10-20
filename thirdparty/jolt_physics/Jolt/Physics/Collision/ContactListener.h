@@ -114,6 +114,7 @@ struct SoftContactPatch
 	bool					mEnabled = false;					// The listener built a patch; otherwise the manifold stays rigid
 	uint8					mClass = 0;							// 0 face, 1 line, 2 point
 	bool					mRigidStick = false;				// The friction rows stick rigidly (no pre-slip springs)
+	bool					mBoundRelaxDamping = false;			// The friction rows' damping never resists the step's relaxation with more than the deflection's own spring
 	uint8					mNumTilt = 0;						// Rows about in-plane axes that carry tilt stiffness
 	uint8					mNumRoll = 0;						// Rows about in-plane axes that carry rolling resistance
 	RVec3					mCentre;							// Where the normal, friction and spin rows act (world); the deepest point when nothing presses

@@ -267,8 +267,13 @@ bool JoltContactListener3D::_try_apply_soft_patch(const JPH::Body &p_jolt_body1,
 		return false;
 	}
 
-	const JoltSoftSurface3D *surface1 = body1->get_contact_soft_surface(p_jolt_body1, p_manifold.mSubShapeID1);
-	const JoltSoftSurface3D *surface2 = body2->get_contact_soft_surface(p_jolt_body2, p_manifold.mSubShapeID2);
+	// Each side's record as the shape holds it (a rigid side's record of kind none when it carries a side profile, PHY-18),
+	// and its soft surface (nullptr for a rigid side): a profile's record never makes a pair soft, never sets the
+	// restitution, the kinetic friction or the counted kind
+	const JoltSoftSurface3D *record1 = body1->get_contact_soft_surface(p_jolt_body1, p_manifold.mSubShapeID1);
+	const JoltSoftSurface3D *record2 = body2->get_contact_soft_surface(p_jolt_body2, p_manifold.mSubShapeID2);
+	const JoltSoftSurface3D *surface1 = record1 != nullptr && record1->kind != JoltSoftSurface3D::KIND_NONE ? record1 : nullptr;
+	const JoltSoftSurface3D *surface2 = record2 != nullptr && record2->kind != JoltSoftSurface3D::KIND_NONE ? record2 : nullptr;
 	if (surface1 == nullptr && surface2 == nullptr) {
 		return false;
 	}
@@ -306,8 +311,8 @@ bool JoltContactListener3D::_try_apply_soft_patch(const JPH::Body &p_jolt_body1,
 	input.body1 = &p_jolt_body1;
 	input.body2 = &p_jolt_body2;
 	input.manifold = &p_manifold;
-	input.surface1 = surface1;
-	input.surface2 = surface2;
+	input.surface1 = record1;
+	input.surface2 = record2;
 	input.static_friction = p_settings.mCombinedFriction;
 	input.sliding_friction = MIN(JoltSpace3D::combine_friction(kinetic1, kinetic2), p_settings.mCombinedFriction);
 	input.tail = p_settings.mSoftTail;
@@ -317,6 +322,8 @@ bool JoltContactListener3D::_try_apply_soft_patch(const JPH::Body &p_jolt_body1,
 	input.face_key.sub1 = p_manifold.mSubShapeID1.GetValue();
 	input.face_key.body2 = p_jolt_body2.GetID().GetIndexAndSequenceNumber();
 	input.face_key.sub2 = p_manifold.mSubShapeID2.GetValue();
+	// PHY-17: a Solid line's rolling creep, unless CRUMB_SOFT_SOLID_CREEP=0 keeps its rigid stick
+	input.solid_creep = space->is_soft_solid_creep_enabled();
 
 	JoltSoftBuildResult result;
 	if (jolt_build_soft_patch(input, *p_settings.mSoftPatch, result)) {
@@ -332,6 +339,12 @@ bool JoltContactListener3D::_try_apply_soft_patch(const JPH::Body &p_jolt_body1,
 		}
 		if (result.not_settled) {
 			space->count_soft_contact(JoltSpace3D::SOFT_COUNT_NOT_SETTLED);
+		}
+		if (result.profiled) {
+			space->count_soft_contact(JoltSpace3D::SOFT_COUNT_PROFILED);
+		}
+		if (result.profile_at_end) {
+			space->count_soft_contact(JoltSpace3D::SOFT_COUNT_PROFILE_AT_END);
 		}
 		if (JoltSpace3D::are_soft_patch_figures_kept()) {
 			const int kind = surface1 != nullptr ? surface1->kind : surface2->kind;

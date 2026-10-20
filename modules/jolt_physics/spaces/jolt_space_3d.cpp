@@ -163,9 +163,11 @@ void JoltSpace3D::_init_physics_system() {
 	// CRUMB: room for this many soft patches a step (the compliant contact); a fresh world, so a rebuild gives an empty
 	// contact cache and no soft tail survives it
 	// The soft gates' test switches, read when a world is made: CRUMB_SOFT_BLOCK=0 leaves the soft rows to last step's
-	// warm start (no cluster correction), CRUMB_SOFT_SHEAR=0 makes every soft patch's friction stick rigidly.
+	// warm start (no cluster correction), CRUMB_SOFT_SHEAR=0 makes every soft patch's friction stick rigidly,
+	// CRUMB_SOFT_SOLID_CREEP=0 keeps a Solid line's friction the rigid stick it was before its rolling creep (PHY-17).
 	const bool block_warm_start = OS::get_singleton()->get_environment("CRUMB_SOFT_BLOCK") != "0";
 	soft_shear_enabled = OS::get_singleton()->get_environment("CRUMB_SOFT_SHEAR") != "0";
+	soft_solid_creep_enabled = OS::get_singleton()->get_environment("CRUMB_SOFT_SOLID_CREEP") != "0";
 	physics_system->InitSoftContacts((JPH::uint)MAX(JoltProjectSettings::max_soft_contact_patches, 0), block_warm_start);
 	// The kept face laws' switches (CRUMB_SOFT_FACE_REUSE_UM, _LOG, _CHECK; jolt_soft_patch_3d.h)
 	soft_face_cache.configure();
@@ -454,9 +456,11 @@ PackedInt32Array JoltSpace3D::get_soft_contact_stats() const {
 	// patches refused for want of room, then (appended) soft clusters over the block cap, impacts on a resting
 	// overlap, rows applied as fixed impulses, soft contacts kept rigid without a tail, kept rigid for threading or
 	// velocity steps, unclassed pairs kept rigid, face patches whose contact set did not settle, sweep-path calls
-	// on soft pairs, Solid face pairs kept rigid, patches the listener built
+	// on soft pairs, Solid face pairs kept rigid, patches the listener built, then (PHY-18) Lines built with their side
+	// profile and those whose loaded interval reached an end of the line. Its length is the host's sign that this
+	// engine reads side profiles.
 	PackedInt32Array stats;
-	stats.resize(15);
+	stats.resize(17);
 	int32_t *w = stats.ptrw();
 	w[0] = (int32_t)soft_stats_last.mPatches;
 	w[1] = (int32_t)soft_stats_last.mDampedRows;
@@ -473,6 +477,8 @@ PackedInt32Array JoltSpace3D::get_soft_contact_stats() const {
 	w[12] = (int32_t)soft_counts_last[SOFT_COUNT_SWEEP_PATH];
 	w[13] = (int32_t)soft_counts_last[SOFT_COUNT_SOLID_FACE];
 	w[14] = (int32_t)soft_counts_last[SOFT_COUNT_BUILT];
+	w[15] = (int32_t)soft_counts_last[SOFT_COUNT_PROFILED];
+	w[16] = (int32_t)soft_counts_last[SOFT_COUNT_PROFILE_AT_END];
 	return stats;
 }
 

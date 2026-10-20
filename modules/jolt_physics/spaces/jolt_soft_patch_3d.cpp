@@ -3632,6 +3632,156 @@ double kg_of(const JoltSoftSurface3D &p_s) {
 	return p_s.bulk_modulus / G;
 }
 
+// PHY-18 test builds only: CRUMB_SIDE_MUTANT=N (scons cppdefines) breaks one piece of the side profile on purpose, so the
+// probe that guards it can be shown to fail. 1: table_line ignores it; 2: the y to Y sign dropped; 3: two_sided_outside
+// does not scale it by the side's share; 4: the deepest point kept at an end; 5: no third core; 6: slices over the whole
+// line. The same define breaks a Solid line's rolling creep (PHY-17): 7: the line keeps its rigid stick; 8: every loaded
+// slice takes the same creep stiffness (pi/2) E* dy; 9: its friction rows' damping is not bounded by the step's
+// relaxation. A shipping build defines none.
+#ifndef CRUMB_SIDE_MUTANT
+#define CRUMB_SIDE_MUTANT 0
+#endif
+
+// A Line's side profile in the patch frame (PHY-18). The curved side's record gives the gap below the cylinder's radius at
+// ascending stations of its own unscaled Y. Jolt's side face puts v[0] at +|scale_y| H (its own Y sign(scale_y) H) and the
+// patch's tangent 2 runs from v[0] to v[1] (y measured from their midpoint), so a station at Y sits at patch y =
+// -scale_y Y L_proj / L_full, L_full the side's length and L_proj its length along tangent 2; and its gap along the normal
+// is |scale_x| g L_proj / L_full (the radius scales as leaf_radius scales it, and the normal leans off the radial
+// direction by the camber). Linear between the stations and held at the end values beyond them, so the overlap s(y) =
+// s0 + camber y - gap(y) is piecewise linear: its maximum over a span lies at a station or an end, and its crossings of a
+// level are exact. Fixed size, no allocation.
+struct LineProfile {
+	int n = 0;
+	double y[JOLT_SIDE_PROFILE_MAX] = {}; // patch y, strictly ascending
+	double g[JOLT_SIDE_PROFILE_MAX] = {}; // the gap along the normal there
+	double radial = 1.0; // a gap along the normal to the radial gap (L_full / L_proj)
+
+	bool build(const JoltSoftSurface3D &p_record, const JPH::Vec3 &p_scale, double p_l_full, double p_l_proj) {
+		if (p_record.profile_count < 2 || !(p_l_full > 0.0) || !(p_l_proj > 0.0)) {
+			return false;
+		}
+		const double k = p_l_proj / p_l_full;
+#if CRUMB_SIDE_MUTANT == 2
+		const double map = double(p_scale.GetY()) * k;
+#else
+		const double map = -double(p_scale.GetY()) * k;
+#endif
+		if (!(map != 0.0)) {
+			return false;
+		}
+		const double sx = std::abs(double(p_scale.GetX()));
+		n = p_record.profile_count;
+		for (int i = 0; i < n; ++i) {
+			const int j = map > 0.0 ? i : n - 1 - i;
+			y[j] = map * double(p_record.profile_y[i]);
+			g[j] = sx * double(p_record.profile_g[i]) * k;
+		}
+		radial = p_l_full / p_l_proj;
+		return true;
+	}
+
+	double gap(double p_y) const {
+		if (p_y <= y[0]) {
+			return g[0];
+		}
+		if (p_y >= y[n - 1]) {
+			return g[n - 1];
+		}
+		int k = 0;
+		while (k + 2 < n && p_y >= y[k + 1]) {
+			++k;
+		}
+		if (p_y == y[k]) {
+			return g[k];
+		}
+		return g[k] + (p_y - y[k]) / (y[k + 1] - y[k]) * (g[k + 1] - g[k]);
+	}
+
+	double squash(double p_s0, double p_camber, double p_y) const {
+		return p_s0 + p_camber * p_y - gap(p_y);
+	}
+
+	// The deepest point over [p_ya, p_yb]: the largest overlap among the ends and the stations between them, a tie going
+	// to the end today's straight side picks (yb for camber >= 0, ya below)
+	double deepest(double p_s0, double p_camber, double p_ya, double p_yb) const {
+#if CRUMB_SIDE_MUTANT == 4
+		return p_camber >= 0.0 ? p_yb : p_ya;
+#else
+		double best_y = p_ya;
+		double best = squash(p_s0, p_camber, p_ya);
+		const bool up = p_camber >= 0.0;
+		for (int k = 0; k < n; ++k) {
+			if (y[k] > p_ya && y[k] < p_yb) {
+				const double s = squash(p_s0, p_camber, y[k]);
+				if (up ? s >= best : s > best) {
+					best = s;
+					best_y = y[k];
+				}
+			}
+		}
+		const double s = squash(p_s0, p_camber, p_yb);
+		if (up ? s >= best : s > best) {
+			best_y = p_yb;
+		}
+		return best_y;
+#endif
+	}
+
+	// The span over which the overlap exceeds p_floor within [p_ya, p_yb], its ends the exact crossings (from the first
+	// point above the level to the last); false when no point is above it
+	bool loaded(double p_s0, double p_camber, double p_ya, double p_yb, double p_floor, double &r_lo, double &r_hi) const {
+		double pts[JOLT_SIDE_PROFILE_MAX + 2];
+		double sv[JOLT_SIDE_PROFILE_MAX + 2];
+		int m = 0;
+		pts[m++] = p_ya;
+		for (int k = 0; k < n; ++k) {
+			if (y[k] > p_ya && y[k] < p_yb) {
+				pts[m++] = y[k];
+			}
+		}
+		pts[m++] = p_yb;
+		for (int i = 0; i < m; ++i) {
+			sv[i] = squash(p_s0, p_camber, pts[i]) - p_floor;
+		}
+		int first = 0;
+		while (first < m && !(sv[first] > 0.0)) {
+			++first;
+		}
+		if (first == m) {
+			return false;
+		}
+		int last = m - 1;
+		while (!(sv[last] > 0.0)) {
+			--last;
+		}
+		r_lo = first == 0 ? pts[0] : pts[first - 1] + (pts[first] - pts[first - 1]) * (-sv[first - 1] / (sv[first] - sv[first - 1]));
+		r_hi = last == m - 1 ? pts[m - 1] : pts[last] + (pts[last + 1] - pts[last]) * (sv[last] / (sv[last] - sv[last + 1]));
+		return true;
+	}
+
+	// The smallest gap over [p_ya, p_yb] (a level line's deepest overlap is its s0 less this)
+	double gmin(double p_ya, double p_yb) const {
+		double m = MIN(gap(p_ya), gap(p_yb));
+		for (int k = 0; k < n; ++k) {
+			if (y[k] > p_ya && y[k] < p_yb) {
+				m = MIN(m, g[k]);
+			}
+		}
+		return m;
+	}
+
+	// The profile one side of two soft sides sees at its share phi of the pair's overlap
+	LineProfile scaled(double p_phi) const {
+		LineProfile r = *this;
+#if CRUMB_SIDE_MUTANT != 3
+		for (int k = 0; k < n; ++k) {
+			r.g[k] *= p_phi;
+		}
+#endif
+		return r;
+	}
+};
+
 // ---------------------------------------------------------------------------------------------------------------
 // Curved patches: the table's strip model along a Line and its axisymmetric figures at a Point
 
@@ -3739,12 +3889,30 @@ double two_sided_exponent(double p_phi, const Lookup &p_l1, const Lookup &p_l2) 
 	return (c1 * c2 + q * c1 * b2 + p_phi * c2 * b1) / den;
 }
 
-// p_layer2 (Stage 1c-b fix round, C3): two curved soft sides, each slice through two_sided_split (p_mu unused)
-bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p_R, const JoltSoftSurface3D &p_layer, double p_mu, CurvedFig &r_fig, const JoltSoftSurface3D *p_layer2 = nullptr) {
+// p_layer2 (Stage 1c-b fix round, C3): two curved soft sides, each slice through two_sided_split (p_mu unused). p_side
+// (PHY-18): the curved side's profile, each slice's squash less its gap and the slices over the loaded interval
+bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p_R, const JoltSoftSurface3D &p_layer, double p_mu, CurvedFig &r_fig, const JoltSoftSurface3D *p_layer2 = nullptr, const LineProfile *p_side = nullptr) {
+#if CRUMB_SIDE_MUTANT == 1
+	p_side = nullptr;
+#endif
 	const double h = p_layer.thickness;
 	const double E = p_layer.modulus;
 	const double kg = kg_of(p_layer);
-	const double dy = (p_yb - p_ya) / N_SLICES;
+	// The slices' span: the line, or a profiled line's loaded interval (none loaded: nothing presses)
+	double sya = p_ya, syb = p_yb;
+	if (p_side != nullptr) {
+		double lo, hi;
+		if (!p_side->loaded(p_s0, p_camber, p_ya, p_yb, 0.0, lo, hi)) {
+			r_fig.F = 0.0;
+			r_fig.empty = true;
+			return true;
+		}
+#if CRUMB_SIDE_MUTANT != 6
+		sya = lo;
+		syb = hi;
+#endif
+	}
+	const double dy = (syb - sya) / N_SLICES;
 	double ys[N_SLICES], P[N_SLICES], b[N_SLICES], m1[N_SLICES], dP[N_SLICES], prof[N_SLICES][table::NUM_ST];
 	// A slice at the squash of the last slice looked up takes that lookup again: the same arguments into the same pure
 	// lookup, which writes every member read below. A level strip (camber 0, as the first-touch law's reference) has one
@@ -3753,9 +3921,9 @@ bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p
 	double look_squash = 0.0;
 	bool look_have = false;
 	for (int i = 0; i < N_SLICES; ++i) {
-		ys[i] = p_ya + (double(i) + 0.5) * dy;
+		ys[i] = sya + (double(i) + 0.5) * dy;
 		P[i] = b[i] = m1[i] = dP[i] = 0.0;
-		const double s = p_s0 + p_camber * ys[i];
+		const double s = p_side == nullptr ? p_s0 + p_camber * ys[i] : p_side->squash(p_s0, p_camber, ys[i]);
 		if (!(s > 0.0)) {
 			continue;
 		}
@@ -3848,7 +4016,9 @@ bool table_line(double p_s0, double p_camber, double p_ya, double p_yb, double p
 	r_fig.area = area;
 	r_fig.J_p = J_p;
 	r_fig.sigma = sig * dy / F;
-	const double sc = p_s0 + p_camber * cy;
+	// The law's exponent d ln F / d ln s at the squash it is read against: the centre's (a profiled line: the deepest
+	// point's, which the patch's squash is)
+	const double sc = p_side == nullptr ? p_s0 + p_camber * cy : p_side->squash(p_s0, p_camber, p_side->deepest(p_s0, p_camber, p_ya, p_yb));
 	r_fig.n_exp = sc > 0.0 ? r_fig.k_n * sc / F : 1.5;
 	return true;
 }
@@ -3907,10 +4077,15 @@ bool two_sided_point(double p_s, double p_R, const JoltSoftSurface3D &p_s1, cons
 }
 
 // Outside the table: the split law with complementarity on the grid, d = s0 + camber y - x^2 / (2R) across a Line
-// (the layer unbounded across, ending at the line's ends) and s0 - r^2 / (2R) at a Point
-bool curved_outside(bool p_line, double p_s0, double p_R, const Coeffs &p_co, double p_camber, double p_ya, double p_yb, CurvedFig &r_fig) {
+// (the layer unbounded across, ending at the line's ends) and s0 - r^2 / (2R) at a Point. p_side (PHY-18): the curved
+// side's profile, each cell's overlap less its gap, the grid along the line one depth past the loaded interval and
+// across it as wide as the deepest overlap (the line's largest, exact over the stations) makes the contact
+bool curved_outside(bool p_line, double p_s0, double p_R, const Coeffs &p_co, double p_camber, double p_ya, double p_yb, CurvedFig &r_fig, const LineProfile *p_side = nullptr) {
 	const double h = p_co.h;
-	const double smax = p_line ? p_s0 + std::abs(p_camber) * MAX(std::abs(p_ya), std::abs(p_yb)) : p_s0;
+	double smax = p_line ? p_s0 + std::abs(p_camber) * MAX(std::abs(p_ya), std::abs(p_yb)) : p_s0;
+	if (p_line && p_side != nullptr) {
+		smax = p_side->squash(p_s0, p_camber, p_side->deepest(p_s0, p_camber, p_ya, p_yb));
+	}
 	const double bg = std::sqrt(2.0 * p_R * MAX(smax, 1e-12));
 	double bx0, bx1, by0, by1;
 	if (p_line) {
@@ -3918,6 +4093,13 @@ bool curved_outside(bool p_line, double p_s0, double p_R, const Coeffs &p_co, do
 		bx1 = bg + h;
 		by0 = p_ya;
 		by1 = p_yb;
+		if (p_side != nullptr) {
+			double lo, hi;
+			if (p_side->loaded(p_s0, p_camber, p_ya, p_yb, 0.0, lo, hi)) {
+				by0 = MAX(p_ya, lo - h);
+				by1 = MIN(p_yb, hi + h);
+			}
+		}
 	} else {
 		bx0 = by0 = -(bg + h);
 		bx1 = by1 = bg + h;
@@ -3946,7 +4128,11 @@ bool curved_outside(bool p_line, double p_s0, double p_R, const Coeffs &p_co, do
 			Y[k] = g.Y(k);
 			dom[k] = inside_convex(soft, X[k], Y[k]);
 			cont[k] = dom[k] && inside_convex(partner, X[k], Y[k]);
-			d[k] = p_line ? p_s0 + p_camber * Y[k] - X[k] * X[k] / (2.0 * p_R) : p_s0 - (X[k] * X[k] + Y[k] * Y[k]) / (2.0 * p_R);
+			if (p_side == nullptr || !p_line) {
+				d[k] = p_line ? p_s0 + p_camber * Y[k] - X[k] * X[k] / (2.0 * p_R) : p_s0 - (X[k] * X[k] + Y[k] * Y[k]) / (2.0 * p_R);
+			} else {
+				d[k] = p_s0 + p_camber * Y[k] - p_side->gap(Y[k]) - X[k] * X[k] / (2.0 * p_R);
+			}
 			active[k] = cont[k] && d[k] > 0.0 && dom[k];
 		}
 		thread_local QSystem scratch_curved_system;
@@ -4110,12 +4296,19 @@ bool curved_outside(bool p_line, double p_s0, double p_R, const Coeffs &p_co, do
 // in it, else its fallback (the split law on the grid, T3 at mu 0). Its normal and camber stiffness are per the pair's
 // squash (times phi). Counted as outside the table. Exact for identical sides as the series is; against the two-body FE
 // with a 70 A side (outside the table's K / G axis) within 1.1 % (stage1cb/c3/fe_two.out.txt).
-bool two_sided_outside(bool p_line, double p_s0, double p_R, const JoltSoftSurface3D &p_s1, const JoltSoftSurface3D &p_s2, double p_camber, double p_ya, double p_yb, CurvedFig &r_fig) {
+bool two_sided_outside(bool p_line, double p_s0, double p_R, const JoltSoftSurface3D &p_s1, const JoltSoftSurface3D &p_s2, double p_camber, double p_ya, double p_yb, CurvedFig &r_fig, const LineProfile *p_side = nullptr) {
 	const double p1 = two_sided_share0(p_s1, p_s2);
 	const bool first = p1 >= 0.5;
 	const double phi = first ? p1 : 1.0 - p1;
 	const JoltSoftSurface3D &L = first ? p_s1 : p_s2;
-	const bool in_table = p_line ? table_line(phi * p_s0, phi * p_camber, p_ya, p_yb, p_R / phi, L, 0.0, r_fig) : table_point(phi * p_s0, p_R / phi, L, 0.0, r_fig);
+	// A profiled line (PHY-18): the side reads its share of the gap, as it reads its share of s0 and the camber
+	LineProfile share;
+	const LineProfile *ps = nullptr;
+	if (p_side != nullptr) {
+		share = p_side->scaled(phi);
+		ps = &share;
+	}
+	const bool in_table = p_line ? (ps == nullptr ? table_line(phi * p_s0, phi * p_camber, p_ya, p_yb, p_R / phi, L, 0.0, r_fig) : table_line(phi * p_s0, phi * p_camber, p_ya, p_yb, p_R / phi, L, 0.0, r_fig, nullptr, ps)) : table_point(phi * p_s0, p_R / phi, L, 0.0, r_fig);
 	if (in_table) {
 		if (r_fig.empty || !(r_fig.F > 0.0)) {
 			r_fig.empty = true;
@@ -4123,7 +4316,7 @@ bool two_sided_outside(bool p_line, double p_s0, double p_R, const JoltSoftSurfa
 		}
 	} else {
 		const Coeffs co = split_coeffs(L.modulus, L.bulk_modulus, L.thickness, false);
-		if (!curved_outside(p_line, phi * p_s0, p_R / phi, co, phi * p_camber, p_ya, p_yb, r_fig)) {
+		if (!curved_outside(p_line, phi * p_s0, p_R / phi, co, phi * p_camber, p_ya, p_yb, r_fig, ps)) {
 			return false;
 		}
 		if (r_fig.empty || !(r_fig.F > 0.0) || !(r_fig.area > 0.0)) {
@@ -4736,6 +4929,39 @@ bool JoltSoftSurface3D::from_params(const PackedFloat32Array &p_params, JoltSoft
 	r_surface.restitution = p[10];
 	r_surface.sliding_friction = p[11];
 	r_surface.rolling_arm = p_params.size() > 12 ? MAX(double(p[12]), 0.0) : 0.0;
+	// The side profile (appended, PHY-18): [13] the station count N, then N pairs (y, g). Read for every kind, so a record
+	// of kind none carries a rigid side's profile. 12 and 13 values read exactly as before.
+	if (p_params.size() > 13) {
+		const float count = p[13];
+		if (count != std::floor(count) || count < 0.0f || count > float(JOLT_SIDE_PROFILE_MAX)) {
+			r_error = vformat("the side profile's station count %f is not a whole number from 0 to %d", count, JOLT_SIDE_PROFILE_MAX);
+			return false;
+		}
+		const int stations = int(count);
+		if (stations == 1) {
+			r_error = "a side profile needs at least 2 stations (or 0 for a straight side)";
+			return false;
+		}
+		if (p_params.size() != 14 + 2 * stations) {
+			r_error = vformat("the side profile of %d stations needs %d values in all, the array has %d", stations, 14 + 2 * stations, p_params.size());
+			return false;
+		}
+		for (int i = 0; i < stations; ++i) {
+			const float y = p[14 + 2 * i];
+			const float g = p[15 + 2 * i];
+			if (i > 0 && !(y > p[12 + 2 * i])) {
+				r_error = vformat("the side profile's station %d is not beyond the one before it (its y must ascend strictly)", i);
+				return false;
+			}
+			if (g < 0.0f) {
+				r_error = vformat("the side profile's gap at station %d is negative (a profile only removes material)", i);
+				return false;
+			}
+			r_surface.profile_y[i] = y;
+			r_surface.profile_g[i] = g;
+		}
+		r_surface.profile_count = stations;
+	}
 	if (r_surface.kind == KIND_NONE) {
 		return true;
 	}
@@ -5517,6 +5743,9 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	double s0 = 0.0, camber = 0.0, ya = 0.0, yb = 0.0;
 	JPH::Vec3 origin = o;
 	HeightPlane flat_plane;
+	// The curved side's profile (PHY-18), set below for a Line along a cylinder's side whose record carries one
+	LineProfile side;
+	const LineProfile *ps = nullptr;
 	if (cls == 1) {
 		// t2 along the line, t1 across it (the rolling direction): t2 = n x t1
 		JPH::Vec3 along = curved->v[1] - curved->v[0];
@@ -5564,6 +5793,14 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			r_result.outcome = JoltSoftBuildResult::NO_OVERLAP;
 			return false;
 		}
+		// The side profile: from the curved side's own record (the raw one, so a rigid side's record of kind none counts),
+		// only where its leaf is a cylinder whose side makes this Line (never a face's edge)
+		const JoltSoftSurface3D *curved_record = curved_is_1 ? p_in.surface1 : p_in.surface2;
+		if (!face_edge && curved_record != nullptr && curved_record->profile_count > 0 && leaf != nullptr && leaf->GetSubType() == JPH::EShapeSubType::Cylinder) {
+			if (side.build(*curved_record, leaf_scale, double((curved->v[1] - curved->v[0]).Length()), y1 - y0)) {
+				ps = &side;
+			}
+		}
 	} else if (face_edge) {
 		// A face's vertex: the overlap is its depth past the flat face along n, at the midpoint between the two
 		body_tangents(body2, n, t1, t2);
@@ -5581,16 +5818,32 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		origin = o;
 	}
 
-	// The deepest point and the patch frame's axes
-	const double y_deep = cls == 1 ? (camber >= 0.0 ? yb : ya) : 0.0;
-	const double d_deep = cls == 1 ? s0 + camber * y_deep : s0;
+	// The deepest point and the patch frame's axes (a profiled line: the largest overlap over the stations and the ends)
+	double y_deep = cls == 1 ? (camber >= 0.0 ? yb : ya) : 0.0;
+	double d_deep = cls == 1 ? s0 + camber * y_deep : s0;
+	if (ps != nullptr) {
+		y_deep = ps->deepest(s0, camber, ya, yb);
+		d_deep = ps->squash(s0, camber, y_deep);
+		// The loaded interval, and whether it reached an end of the line (the tripwire for a band too short for its camber)
+		r_result.profiled = true;
+		r_result.y_deep = y_deep;
+		double lo, hi;
+		if (ps->loaded(s0, camber, ya, yb, 0.0, lo, hi)) {
+			r_result.y_lo = lo;
+			r_result.y_hi = hi;
+			r_result.profile_at_end = ps->squash(s0, camber, ya) > 0.0 || ps->squash(s0, camber, yb) > 0.0;
+		} else {
+			r_result.y_lo = yb;
+			r_result.y_hi = ya;
+		}
+	}
 	r_patch.mTangent1 = t1;
 	r_patch.mTangent2 = t2;
 	r_patch.mSquash = float(d_deep);
 	auto line_world = [&](double p_x, double p_y) {
 		if (cls == 1) {
 			const double zf = flat_plane.z0 + flat_plane.gx * p_x + flat_plane.gy * p_y;
-			const double zl = zf + (curved_is_1 ? 1.0 : -1.0) * (s0 + camber * p_y);
+			const double zl = zf + (curved_is_1 ? 1.0 : -1.0) * (ps == nullptr ? s0 + camber * p_y : ps->squash(s0, camber, p_y));
 			return base + origin + float(p_x) * t1 + float(p_y) * t2 + float(0.5 * (zf + zl)) * n;
 		}
 		return base + origin + float(p_x) * t1 + float(p_y) * t2;
@@ -5604,20 +5857,37 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	double y_band = y_deep;
 	if (cls == 1) {
 		const double band = MAX(double(JoltProjectSettings::speculative_contact_distance), 1e-9);
-		const double dy = (yb - ya) / N_SLICES;
-		double sp = 0.0, spy = 0.0;
-		for (int i = 0; i < N_SLICES; ++i) {
-			const double y = ya + (double(i) + 0.5) * dy;
-			const double p = MAX(camber * (y - y_deep) + band, 0.0);
-			sp += p;
-			spy += p * y;
-		}
-		if (sp > 0.0) {
-			y_band = spy / sp;
+		if (ps == nullptr) {
+			const double dy = (yb - ya) / N_SLICES;
+			double sp = 0.0, spy = 0.0;
+			for (int i = 0; i < N_SLICES; ++i) {
+				const double y = ya + (double(i) + 0.5) * dy;
+				const double p = MAX(camber * (y - y_deep) + band, 0.0);
+				sp += p;
+				spy += p * y;
+			}
+			if (sp > 0.0) {
+				y_band = spy / sp;
+			}
+		} else {
+			// A profiled line: the slices over the interval where the overlap is within the band of its deepest
+			double lo = ya, hi = yb;
+			ps->loaded(s0, camber, ya, yb, d_deep - band, lo, hi);
+			const double dy = (hi - lo) / N_SLICES;
+			double sp = 0.0, spy = 0.0;
+			for (int i = 0; i < N_SLICES; ++i) {
+				const double y = lo + (double(i) + 0.5) * dy;
+				const double p = MAX(ps->squash(s0, camber, y) - d_deep + band, 0.0);
+				sp += p;
+				spy += p * y;
+			}
+			if (sp > 0.0) {
+				y_band = spy / sp;
+			}
 		}
 		r_patch.mHasImpactPoint = true;
 		r_patch.mImpactPoint = line_world(0.0, y_band);
-		r_patch.mImpactSquash = float(s0 + camber * y_band);
+		r_patch.mImpactSquash = float(ps == nullptr ? s0 + camber * y_band : ps->squash(s0, camber, y_band));
 	}
 
 	CurvedFig fig;
@@ -5625,6 +5895,11 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 	double layer = 0.0;
 	bool rigid_stick = true;
 	double shear_G = 0.0;
+	// A Solid line's rolling creep (PHY-17): set only where the switch is on and the line presses
+	bool solid_creep = false;
+	double creep_shear = 0.0, creep_spin = 0.0;
+	// A profiled line's level laws read the line at s + gm, whose deepest overlap is s
+	const double gm = ps != nullptr ? ps->gmin(ya, yb) : 0.0;
 	if (soft.kind == JoltSoftSurface3D::KIND_LAYER) {
 		layer = two_layers ? s1->thickness + s2->thickness : soft.thickness;
 		rigid_stick = false;
@@ -5636,16 +5911,16 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		const JoltSoftSurface3D *lead_side = two_layers ? (two_sided_share0(*s1, *s2) >= 0.5 ? s1 : s2) : &soft;
 		if (s0 > 0.0 || (cls == 1 && d_deep > 0.0)) {
 			if (two_layers) {
-				have = cls == 1 ? table_line(s0, camber, ya, yb, R, *s1, 0.0, fig, s2) : two_sided_point(s0, R, *s1, *s2, fig);
+				have = cls == 1 ? table_line(s0, camber, ya, yb, R, *s1, 0.0, fig, s2, ps) : two_sided_point(s0, R, *s1, *s2, fig);
 				if (!have) {
-					have = two_sided_outside(cls == 1, s0, R, *s1, *s2, camber, ya, yb, fig);
+					have = two_sided_outside(cls == 1, s0, R, *s1, *s2, camber, ya, yb, fig, ps);
 					r_result.outside_table = have && !fig.empty;
 				}
 			} else {
-				have = cls == 1 ? table_line(s0, camber, ya, yb, R, soft, mu, fig) : table_point(s0, R, soft, mu, fig);
+				have = cls == 1 ? table_line(s0, camber, ya, yb, R, soft, mu, fig, nullptr, ps) : table_point(s0, R, soft, mu, fig);
 			}
 			if (!have && !two_layers) {
-				have = curved_outside(cls == 1, s0, R, co, camber, ya, yb, fig);
+				have = curved_outside(cls == 1, s0, R, co, camber, ya, yb, fig, ps);
 				if (have && !fig.empty) {
 					fig.face_ratio = table_ratio(false, shape_factor(fig.area, fig.Ixx, fig.Iyy, soft.thickness), mu, kg_of(soft));
 					fig.F *= fig.face_ratio;
@@ -5655,31 +5930,57 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				}
 			}
 		}
-		// The law from first touch: the table at a reference squash of a thousandth of the depth (two soft sides: of the
-		// layers' whole depth, through the series)
-		CurvedFig ref;
-		const double s_ref = 1e-3 * (two_layers ? layer : soft.thickness);
-		bool ref_ok = two_layers ? (cls == 1 ? table_line(s_ref, 0.0, ya, yb, R, *s1, 0.0, ref, s2) : two_sided_point(s_ref, R, *s1, *s2, ref)) : (cls == 1 ? table_line(s_ref, 0.0, ya, yb, R, soft, mu, ref) : table_point(s_ref, R, soft, mu, ref));
-		if (ref_ok && !ref.empty && ref.F > 0.0) {
-			const double nexp = MAX(ref.n_exp, 1.0);
-			r_patch.mLawExponent = float(nexp);
-			r_patch.mLawCoefficient = float(ref.F / std::pow(s_ref, nexp));
-		} else if (have && !fig.empty && s0 > 0.0) {
-			const double nexp = MAX(fig.n_exp, 1.0);
-			r_patch.mLawExponent = float(nexp);
-			r_patch.mLawCoefficient = float(fig.F / std::pow(MAX(d_deep, 1e-9), nexp));
-		} else if (two_layers) {
-			// Two soft sides outside the table across a gap: the law the pressed patch uses there (two_sided_outside), read
-			// at the squash where the leading side's contact half-width reaches its depth, sqrt(2 R s) = h. The grid cannot
-			// resolve a contact much narrower than its cells (N_SHORT cells across a box of half-width sqrt(2 R s) + h): at
-			// a thousandth of the depth it finds no contact at all.
-			const double hl = lead_side->thickness;
-			const double s_two = MAX(1e-3 * layer, hl * hl / (2.0 * R));
-			CurvedFig ref2;
-			if (two_sided_outside(cls == 1, s_two, R, *s1, *s2, 0.0, ya, yb, ref2) && !ref2.empty && ref2.F > 0.0) {
-				const double nexp = MAX(ref2.n_exp, 1.0);
+		if (ps == nullptr) {
+			// The law from first touch: the table at a reference squash of a thousandth of the depth (two soft sides: of the
+			// layers' whole depth, through the series)
+			CurvedFig ref;
+			const double s_ref = 1e-3 * (two_layers ? layer : soft.thickness);
+			bool ref_ok = two_layers ? (cls == 1 ? table_line(s_ref, 0.0, ya, yb, R, *s1, 0.0, ref, s2) : two_sided_point(s_ref, R, *s1, *s2, ref)) : (cls == 1 ? table_line(s_ref, 0.0, ya, yb, R, soft, mu, ref) : table_point(s_ref, R, soft, mu, ref));
+			if (ref_ok && !ref.empty && ref.F > 0.0) {
+				const double nexp = MAX(ref.n_exp, 1.0);
 				r_patch.mLawExponent = float(nexp);
-				r_patch.mLawCoefficient = float(ref2.F / std::pow(s_two, nexp));
+				r_patch.mLawCoefficient = float(ref.F / std::pow(s_ref, nexp));
+			} else if (have && !fig.empty && s0 > 0.0) {
+				const double nexp = MAX(fig.n_exp, 1.0);
+				r_patch.mLawExponent = float(nexp);
+				r_patch.mLawCoefficient = float(fig.F / std::pow(MAX(d_deep, 1e-9), nexp));
+			} else if (two_layers) {
+				// Two soft sides outside the table across a gap: the law the pressed patch uses there (two_sided_outside), read
+				// at the squash where the leading side's contact half-width reaches its depth, sqrt(2 R s) = h. The grid cannot
+				// resolve a contact much narrower than its cells (N_SHORT cells across a box of half-width sqrt(2 R s) + h): at
+				// a thousandth of the depth it finds no contact at all.
+				const double hl = lead_side->thickness;
+				const double s_two = MAX(1e-3 * layer, hl * hl / (2.0 * R));
+				CurvedFig ref2;
+				if (two_sided_outside(cls == 1, s_two, R, *s1, *s2, 0.0, ya, yb, ref2) && !ref2.empty && ref2.F > 0.0) {
+					const double nexp = MAX(ref2.n_exp, 1.0);
+					r_patch.mLawExponent = float(nexp);
+					r_patch.mLawCoefficient = float(ref2.F / std::pow(s_two, nexp));
+				}
+			}
+		} else if (onset_pending || !(have && !fig.empty && fig.F > 0.0)) {
+			// A profiled line's law from first touch, read only where the solver reads it (a first touch still to be decided,
+			// or a patch that presses nothing): the level profiled line at a reference squash of its deepest point
+			CurvedFig ref;
+			const double s_ref = 1e-3 * (two_layers ? layer : soft.thickness);
+			const bool ref_ok = two_layers ? table_line(s_ref + gm, 0.0, ya, yb, R, *s1, 0.0, ref, s2, ps) : table_line(s_ref + gm, 0.0, ya, yb, R, soft, mu, ref, nullptr, ps);
+			if (ref_ok && !ref.empty && ref.F > 0.0) {
+				const double nexp = MAX(ref.n_exp, 1.0);
+				r_patch.mLawExponent = float(nexp);
+				r_patch.mLawCoefficient = float(ref.F / std::pow(s_ref, nexp));
+			} else if (have && !fig.empty && d_deep > 0.0) {
+				const double nexp = MAX(fig.n_exp, 1.0);
+				r_patch.mLawExponent = float(nexp);
+				r_patch.mLawCoefficient = float(fig.F / std::pow(MAX(d_deep, 1e-9), nexp));
+			} else if (two_layers) {
+				const double hl = lead_side->thickness;
+				const double s_two = MAX(1e-3 * layer, hl * hl / (2.0 * R));
+				CurvedFig ref2;
+				if (two_sided_outside(true, s_two + gm, R, *s1, *s2, 0.0, ya, yb, ref2, ps) && !ref2.empty && ref2.F > 0.0) {
+					const double nexp = MAX(ref2.n_exp, 1.0);
+					r_patch.mLawExponent = float(nexp);
+					r_patch.mLawCoefficient = float(ref2.F / std::pow(s_two, nexp));
+				}
 			}
 		}
 		// The first-touch law the solver reads (Stage 1c-b): the pressed law itself at six squashes, the same law this
@@ -5695,14 +5996,14 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 			if (two_layers) {
 				kept = set_law_samples(1e-3 * layer, 0.316 * layer, 6, true, [&](double p_s, double &r_F) {
 					CurvedFig f;
-					const bool ok = cls == 1 ? table_line(p_s, 0.0, ya, yb, R, *s1, 0.0, f, s2) : two_sided_point(p_s, R, *s1, *s2, f);
+					const bool ok = cls == 1 ? (ps == nullptr ? table_line(p_s, 0.0, ya, yb, R, *s1, 0.0, f, s2) : table_line(p_s + gm, 0.0, ya, yb, R, *s1, 0.0, f, s2, ps)) : two_sided_point(p_s, R, *s1, *s2, f);
 					r_F = f.F;
 					return ok && !f.empty;
 				}, r_patch);
 			} else {
 				kept = set_law_samples(1e-3 * soft.thickness, 0.316 * soft.thickness, 6, true, [&](double p_s, double &r_F) {
 					CurvedFig f;
-					const bool ok = cls == 1 ? table_line(p_s, 0.0, ya, yb, R, soft, mu, f) : table_point(p_s, R, soft, mu, f);
+					const bool ok = cls == 1 ? (ps == nullptr ? table_line(p_s, 0.0, ya, yb, R, soft, mu, f) : table_line(p_s + gm, 0.0, ya, yb, R, soft, mu, f, nullptr, ps)) : table_point(p_s, R, soft, mu, f);
 					r_F = f.F;
 					return ok && !f.empty;
 				}, r_patch);
@@ -5711,7 +6012,7 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				const double hh = lead_side->thickness;
 				set_law_samples(MAX(1e-3 * hh, 0.25 * hh * hh / (2.0 * R)), 0.5 * layer, 6, false, [&](double p_s, double &r_F) {
 					CurvedFig f;
-					if (!two_sided_outside(cls == 1, p_s, R, *s1, *s2, 0.0, ya, yb, f) || f.empty || !(f.F > 0.0)) {
+					if (!(ps == nullptr ? two_sided_outside(cls == 1, p_s, R, *s1, *s2, 0.0, ya, yb, f) : two_sided_outside(true, p_s + gm, R, *s1, *s2, 0.0, ya, yb, f, ps)) || f.empty || !(f.F > 0.0)) {
 						return false;
 					}
 					r_F = f.F;
@@ -5721,7 +6022,7 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				const double hh = co.h;
 				set_law_samples(MAX(1e-3 * hh, 0.25 * hh * hh / (2.0 * R)), 0.5 * layer, 6, false, [&](double p_s, double &r_F) {
 					CurvedFig f;
-					if (!curved_outside(cls == 1, p_s, R, co, 0.0, ya, yb, f) || f.empty || !(f.F > 0.0)) {
+					if (!(ps == nullptr ? curved_outside(cls == 1, p_s, R, co, 0.0, ya, yb, f) : curved_outside(true, p_s + gm, R, co, 0.0, ya, yb, f, ps)) || f.empty || !(f.F > 0.0)) {
 						return false;
 					}
 					r_F = f.F * table_ratio(false, shape_factor(f.area, f.Ixx, f.Iyy, soft.thickness), mu, kg_of(soft));
@@ -5756,18 +6057,27 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				}, r_patch);
 			}
 		} else {
-			// UNSOURCED line law (design 2.3): slices along the line
-			const double dy = (yb - ya) / N_SLICES;
+			// UNSOURCED line law (design 2.3): slices along the line (a profiled line: over its loaded interval, each slice's
+			// squash less its gap)
+			double sya = ya, syb = yb;
+#if CRUMB_SIDE_MUTANT != 6
+			if (ps != nullptr) {
+				ps->loaded(s0, camber, ya, yb, 0.0, sya, syb);
+			}
+#endif
+			const double dy = (syb - sya) / N_SLICES;
 			double F = 0.0, Fy = 0.0, area = 0.0, m1 = 0.0, bmax = 0.0, kn = 0.0;
-			double P[N_SLICES], ys[N_SLICES], kslice[N_SLICES];
+			double P[N_SLICES], ys[N_SLICES], kslice[N_SLICES], bs[N_SLICES];
 			for (int i = 0; i < N_SLICES; ++i) {
-				ys[i] = ya + (i + 0.5) * dy;
-				const double s = s0 + camber * ys[i];
+				ys[i] = sya + (i + 0.5) * dy;
+				const double s = ps == nullptr ? s0 + camber * ys[i] : ps->squash(s0, camber, ys[i]);
 				P[i] = 0.0;
 				kslice[i] = 0.0;
+				bs[i] = 0.0;
 				if (s > 0.0) {
 					double b;
 					solid_line_load(s, R, Es, P[i], b);
+					bs[i] = b;
 					double P2, b2;
 					solid_line_load(s * 1.001, R, Es, P2, b2);
 					kslice[i] = (P2 - P[i]) / (0.001 * s);
@@ -5807,19 +6117,68 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				fig.n_exp = 1.0;
 				fig.empty = false;
 				have = true;
+				// PHY-17: rolling creep (CRUMB_SOFT_SOLID_CREEP, on unless 0). Each loaded slice is a strip of Carter's
+				// rolling line contact, whose creep force per unit creepage is (pi/2) E* b_i dy; read on the patch's one
+				// relaxation length sigma = bmax, its stiffness is k'_i = (pi/2) E* (b_i / bmax) dy, so a slice that only just
+				// touches adds almost nothing and a level line (b_i = bmax) gives Carter's (pi/2) E* b L. Their sum is the
+				// shear stiffness and their second moment about the centre the spin stiffness; the compliant, relaxing
+				// friction block a Layer uses then gives the brush law F = k sigma v / V while the line rolls (the crown
+				// desk's section 4). Over a profiled line's loaded interval, its own slices. Carter's coefficient is the
+				// longitudinal one, which turn slip (longitudinal creepage varying along the line) reads; the block has one
+				// shear stiffness for both tangents, so the lateral creep takes it too and is 1 / (1 - nu) too stiff (an
+				// elastic line's lateral coefficient is (1 - nu) times it) until the block has a stiffness per tangent.
+				if (p_in.solid_creep) {
+#if CRUMB_SIDE_MUTANT != 7
+					rigid_stick = false;
+#endif
+					solid_creep = true;
+					for (int i = 0; i < N_SLICES; ++i) {
+						if (P[i] > 0.0) {
+#if CRUMB_SIDE_MUTANT == 8
+							const double kc = 0.5 * PI * Es * dy;
+#else
+							const double kc = 0.5 * PI * Es * (bs[i] / bmax) * dy;
+#endif
+							creep_shear += kc;
+							creep_spin += kc * (ys[i] - fig.cy) * (ys[i] - fig.cy);
+						}
+					}
+				}
 			}
 			r_patch.mLawCoefficient = float(MAX(kn, 0.0));
 			r_patch.mLawExponent = 1.0f;
 			// The first-touch law the solver reads (Stage 1c-b): the level line's slices at six squashes from 1e-4 R to
 			// 0.03 R; across a gap the slices carry nothing, so without them no first touch could be decided
 			if (onset_pending || !(F > 0.0)) {
-				const double L = yb - ya;
-				set_law_samples(1e-4 * R, 0.03 * R, 6, true, [&](double p_s, double &r_F) {
-					double P, b;
-					solid_line_load(p_s, R, Es, P, b);
-					r_F = L * P;
-					return true;
-				}, r_patch);
+				if (ps == nullptr) {
+					const double L = yb - ya;
+					set_law_samples(1e-4 * R, 0.03 * R, 6, true, [&](double p_s, double &r_F) {
+						double P, b;
+						solid_line_load(p_s, R, Es, P, b);
+						r_F = L * P;
+						return true;
+					}, r_patch);
+				} else {
+					// A profiled line: the level profiled line's slices at each deepest squash, summed
+					set_law_samples(1e-4 * R, 0.03 * R, 6, true, [&](double p_s, double &r_F) {
+						double lo = ya, hi = yb;
+#if CRUMB_SIDE_MUTANT != 6
+						ps->loaded(p_s + gm, 0.0, ya, yb, 0.0, lo, hi);
+#endif
+						const double d = (hi - lo) / N_SLICES;
+						double sum = 0.0;
+						for (int i = 0; i < N_SLICES; ++i) {
+							const double s = ps->squash(p_s + gm, 0.0, lo + (i + 0.5) * d);
+							if (s > 0.0) {
+								double P, b;
+								solid_line_load(s, R, Es, P, b);
+								sum += P * d;
+							}
+						}
+						r_F = sum;
+						return sum > 0.0;
+					}, r_patch);
+				}
 			}
 		}
 	} else {
@@ -5841,48 +6200,99 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 				have = true;
 			}
 		} else if (d_deep > 0.0) {
-			const double L = yb - ya;
-			const double kl = soft.lumped_stiffness / L;
-			const double dy = L / N_SLICES;
-			double F = 0.0, Fy = 0.0, kn = 0.0, len = 0.0;
-			double P[N_SLICES], ys[N_SLICES];
-			for (int i = 0; i < N_SLICES; ++i) {
-				ys[i] = ya + (i + 0.5) * dy;
-				const double s = s0 + camber * ys[i];
-				P[i] = s > 0.0 ? kl * s : 0.0;
-				if (s > 0.0) {
-					F += P[i] * dy;
-					Fy += P[i] * ys[i] * dy;
-					kn += kl * dy;
-					len += dy;
-				}
-			}
-			if (F > 0.0) {
-				fig.F = F;
-				fig.cy = Fy / F;
-				fig.k_n = kn;
-				double rs = 0.0, ktx = 0.0;
-				bool first = true;
+			if (ps == nullptr) {
+				const double L = yb - ya;
+				const double kl = soft.lumped_stiffness / L;
+				const double dy = L / N_SLICES;
+				double F = 0.0, Fy = 0.0, kn = 0.0, len = 0.0;
+				double P[N_SLICES], ys[N_SLICES];
 				for (int i = 0; i < N_SLICES; ++i) {
-					if (P[i] > 0.0) {
-						rs += P[i] * std::abs(ys[i] - fig.cy) * dy;
-						ktx += kl * (ys[i] - fig.cy) * (ys[i] - fig.cy) * dy;
-						if (first) {
-							fig.y_lo = ys[i] - 0.5 * dy;
-							first = false;
-						}
-						fig.y_hi = ys[i] + 0.5 * dy;
+					ys[i] = ya + (i + 0.5) * dy;
+					const double s = s0 + camber * ys[i];
+					P[i] = s > 0.0 ? kl * s : 0.0;
+					if (s > 0.0) {
+						F += P[i] * dy;
+						Fy += P[i] * ys[i] * dy;
+						kn += kl * dy;
+						len += dy;
 					}
 				}
-				const double a = std::sqrt(2.0 * R * MAX(s0 + camber * fig.cy, 0.0));
-				fig.m1x = 3.0 * a / 8.0;
-				fig.r_s = rs / F;
-				fig.kt_x = ktx;
-				fig.area = 2.0 * a * len;
-				fig.sigma = a;
-				fig.n_exp = 1.0;
-				fig.empty = false;
-				have = true;
+				if (F > 0.0) {
+					fig.F = F;
+					fig.cy = Fy / F;
+					fig.k_n = kn;
+					double rs = 0.0, ktx = 0.0;
+					bool first = true;
+					for (int i = 0; i < N_SLICES; ++i) {
+						if (P[i] > 0.0) {
+							rs += P[i] * std::abs(ys[i] - fig.cy) * dy;
+							ktx += kl * (ys[i] - fig.cy) * (ys[i] - fig.cy) * dy;
+							if (first) {
+								fig.y_lo = ys[i] - 0.5 * dy;
+								first = false;
+							}
+							fig.y_hi = ys[i] + 0.5 * dy;
+						}
+					}
+					const double a = std::sqrt(2.0 * R * MAX(s0 + camber * fig.cy, 0.0));
+					fig.m1x = 3.0 * a / 8.0;
+					fig.r_s = rs / F;
+					fig.kt_x = ktx;
+					fig.area = 2.0 * a * len;
+					fig.sigma = a;
+					fig.n_exp = 1.0;
+					fig.empty = false;
+					have = true;
+				}
+			} else {
+				// A profiled line: the maker's law for the whole contact, F = K_l d_deep (its stiffness is measured against one
+				// flat with the part's own running surface), spread along the line by the overlap s(y) over the loaded
+				// interval, a bed of springs of K_l d_deep / (the integral of s) per length there
+				double lo = ya, hi = yb;
+#if CRUMB_SIDE_MUTANT != 6
+				ps->loaded(s0, camber, ya, yb, 0.0, lo, hi);
+#endif
+				const double dy = (hi - lo) / N_SLICES;
+				double S = 0.0, Sy = 0.0, len = 0.0;
+				double P[N_SLICES], ys[N_SLICES];
+				for (int i = 0; i < N_SLICES; ++i) {
+					ys[i] = lo + (i + 0.5) * dy;
+					const double s = ps->squash(s0, camber, ys[i]);
+					P[i] = s > 0.0 ? s : 0.0;
+					if (s > 0.0) {
+						S += s * dy;
+						Sy += s * ys[i] * dy;
+						len += dy;
+					}
+				}
+				if (S > 0.0) {
+					const double kb = soft.lumped_stiffness * d_deep / S;
+					fig.F = soft.lumped_stiffness * d_deep;
+					fig.cy = Sy / S;
+					fig.k_n = soft.lumped_stiffness;
+					double rs = 0.0, ktx = 0.0;
+					bool first = true;
+					for (int i = 0; i < N_SLICES; ++i) {
+						if (P[i] > 0.0) {
+							rs += kb * P[i] * std::abs(ys[i] - fig.cy) * dy;
+							ktx += kb * (ys[i] - fig.cy) * (ys[i] - fig.cy) * dy;
+							if (first) {
+								fig.y_lo = ys[i] - 0.5 * dy;
+								first = false;
+							}
+							fig.y_hi = ys[i] + 0.5 * dy;
+						}
+					}
+					const double a = std::sqrt(2.0 * R * MAX(ps->squash(s0, camber, fig.cy), 0.0));
+					fig.m1x = 3.0 * a / 8.0;
+					fig.r_s = rs / fig.F;
+					fig.kt_x = ktx;
+					fig.area = 2.0 * a * len;
+					fig.sigma = a;
+					fig.n_exp = 1.0;
+					fig.empty = false;
+					have = true;
+				}
 			}
 		}
 		r_patch.mLawCoefficient = float(soft.lumped_stiffness);
@@ -5894,16 +6304,25 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 
 	r_patch.mRigidStick = rigid_stick;
 	r_patch.mCoreGap = float(layer - d_deep);
-	// The core guard: a Line's two loaded ends, a Point's deepest point
+	// The core guard: a Line's two loaded ends, a Point's deepest point; a profiled line also its deepest point, which a
+	// profile puts between the ends (always three cores, so the warm start's count holds)
 	if (cls == 1) {
 		const double ends[2] = { ya, yb };
 		for (int i = 0; i < 2; ++i) {
-			const double d = s0 + camber * ends[i];
+			const double d = ps == nullptr ? s0 + camber * ends[i] : ps->squash(s0, camber, ends[i]);
 			r_patch.mCorePoint[i] = line_world(0.0, ends[i]);
 			r_patch.mCoreSquash[i] = float(d);
 			r_patch.mCoreGapAt[i] = float(layer - d);
 		}
 		r_patch.mNumCores = 2;
+#if CRUMB_SIDE_MUTANT != 5
+		if (ps != nullptr) {
+			r_patch.mCorePoint[2] = r_patch.mDeepest;
+			r_patch.mCoreSquash[2] = float(d_deep);
+			r_patch.mCoreGapAt[2] = float(layer - d_deep);
+			r_patch.mNumCores = 3;
+		}
+#endif
 	} else {
 		r_patch.mCorePoint[0] = r_patch.mDeepest;
 		r_patch.mCoreSquash[0] = float(d_deep);
@@ -5911,6 +6330,11 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		r_patch.mNumCores = 1;
 	}
 	r_patch.mRollingRadius = float(R);
+	if (ps != nullptr) {
+		// A profiled line rolls on its radius at the centre of pressure (the band's centroid while nothing presses)
+		const double cy = have && !fig.empty && fig.F > 0.0 ? fig.cy : y_band;
+		r_patch.mRollingRadius = float(R - ps->gap(cy) * ps->radial);
+	}
 	r_result.face_ratio = fig.face_ratio;
 	if (have && !fig.empty && fig.F > 0.0) {
 		r_result.raw_force = fig.F / fig.face_ratio;
@@ -5923,7 +6347,15 @@ bool jolt_build_soft_patch(const JoltSoftPatchInput &p_in, JPH::SoftContactPatch
 		r_patch.mRelaxationLength = float(fig.sigma);
 		r_result.m1[0] = fig.m1x;
 		r_result.m1[1] = fig.m1y;
-		if (!rigid_stick && two_layers) {
+		if (solid_creep) {
+			// A Solid line's rolling creep (PHY-17), from its slices above. Its relaxation length is a Hertz half-width, so a
+			// rolling step relaxes most of the deflection: the friction rows' damping is bounded by it (FinalizeSoftPatches)
+			r_patch.mShearStiffness = float(creep_shear);
+			r_patch.mSpinStiffness = float(creep_spin);
+#if CRUMB_SIDE_MUTANT != 9
+			r_patch.mBoundRelaxDamping = true;
+#endif
+		} else if (!rigid_stick && two_layers) {
 			// Two soft sides (Stage 1c-b fix round, C3): the two layers' shear in series, A / (h1/G1 + h2/G2) per tangent
 			// and J_p / (h1/G1 + h2/G2) in spin
 			double G1, nu1, G2, nu2;
@@ -6016,4 +6448,8 @@ void jolt_soft_patch_debug_figures(const JPH::SoftContactPatch &p_patch, const J
 	w[37] = float(p_patch.mDeepest.GetZ());
 	w[38] = p_patch.mRelaxationLength;
 	w[39] = p_patch.mRigidStick ? 1.0f : 0.0f;
+	w[40] = p_result.profiled ? 1.0f : 0.0f;
+	w[41] = float(p_result.y_lo);
+	w[42] = float(p_result.y_hi);
+	w[43] = float(p_result.y_deep);
 }

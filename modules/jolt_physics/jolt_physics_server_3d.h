@@ -278,24 +278,33 @@ public:
 	// stays rigid. body_set_shape_soft_surface's array, in solver units (millimetres, kilograms, seconds): kind (0
 	// none, 1 layer, 2 solid, 3 lumped), modulus, bulk modulus, thickness, lumped stiffness, travel, damping ratios
 	// for force laws of exponent 1, 1.5 and 2, hysteresis loss fraction, restitution, sliding friction (negative: the
-	// static one), and appended here: the measured rolling resistance arm (mm, added to the layer's own). An empty
-	// array makes the shape rigid. space_get_soft_contact_stats gives the last step's counts: [0] patches solved soft,
+	// static one), and appended here: [12] the measured rolling resistance arm (mm, added to the layer's own); [13] a
+	// side profile's station count N (0, or 2 to 32; PHY-18) and [14 .. 13 + 2N] its N pairs (y, g): y strictly ascending
+	// along the shape's own unscaled Y, g >= 0 the gap below its radius there (mm), linear between the stations and held at
+	// the end values beyond. Read only where a Line's curved side is a cylinder. A profile is read for every kind, so an
+	// array of kind 0 with one makes a rigid cylinder's profile, read by a soft partner's patch (the shape stays rigid).
+	// 12 and 13 values read as before, a refused profile keeps the shape's old surface. An empty array makes the shape
+	// rigid. space_get_soft_contact_stats gives the last step's counts: [0] patches solved soft,
 	// [1] rows the step damps (theta above 0), [2] first touches solved as impacts, [3] curved patches outside the
 	// layer table, [4] patches refused for want of room, and appended: [5] soft clusters over the block cap, [6]
 	// impacts on an overlap that was already there, [7] rows applied as fixed impulses, [8] soft contacts kept rigid
 	// without a tail, [9] kept rigid for threading or velocity steps below 8, [10] pairs the builder could not class,
 	// [11] face patches whose contact set did not settle, [12] sweep-path calls on soft pairs, [13] Solid face pairs
-	// (rigid by design), [14] patches the listener built. space_debug_soft_patch gives the last step's figures of the
-	// first patch between the two shapes (kept only with physics/jolt_physics_3d/debug/soft_patch_figures on; an empty
-	// array otherwise), 40 floats in solver units: [0] class (0 face, 1 line, 2 point), [1] kind,
-	// [2] force, [3] squash at the deepest point, [4] normal stiffness, [5..7] centre of pressure, [8..10] normal (body
-	// 1 to body 2), [11, 12] tilt stiffnesses, [13] spin radius, [14, 15] rolling arms, [16] area, [17, 18] the field's
-	// first moments along the tangents, [19] static and [20] sliding friction, [21] the face condition: the ratio
-	// applied (T3), or for a Layer face against a partner that is not a Layer the face law v2's friction share Phi (no
-	// ratio applied), [22] outside the table (1), [23] active-set passes, [24] contact set settled (1), [25] shear and
-	// [26] spin stiffness, [27] restitution, [28, 29] the first-touch law's coefficient and exponent, [30..32] tangent 1,
-	// [33] the force before the face ratio (the force itself for the face law v2), [34] layer left before the cores
-	// meet, [35..37] the deepest point, [38] the relaxation length, [39] rigid stick (1).
+	// (rigid by design), [14] patches the listener built, [15] Lines built with their side profile, [16] of those, Lines
+	// whose loaded interval reached an end of the line (17 values: this engine reads side profiles). space_debug_soft_patch
+	// gives the last step's figures of the first patch between the two shapes (kept only with
+	// physics/jolt_physics_3d/debug/soft_patch_figures on; an empty array otherwise), 44 floats in solver units: [0] class
+	// (0 face, 1 line, 2 point), [1] kind, [2] force, [3] squash at the deepest point, [4] normal stiffness, [5..7] centre
+	// of pressure, [8..10] normal (body 1 to body 2), [11, 12] tilt stiffnesses, [13] spin radius, [14, 15] rolling arms,
+	// [16] area, [17, 18] the field's first moments along the tangents, [19] static and [20] sliding friction, [21] the
+	// face condition: the ratio applied (T3), or for a Layer face against a partner that is not a Layer the face law v2's
+	// friction share Phi (no ratio applied), [22] outside the table (1), [23] active-set passes, [24] contact set settled
+	// (1), [25] shear and [26] spin stiffness, [27] restitution, [28, 29] the first-touch law's coefficient and exponent
+	// (a profiled Layer line writes them only where the solver reads them: a first touch still to be decided, or a patch
+	// that presses nothing; 0 and 1 otherwise), [30..32] tangent 1, [33] the force before the face ratio (the force itself
+	// for the face law v2), [34] layer left before the cores meet, [35..37] the deepest point, [38] the relaxation length,
+	// [39] rigid stick (1), [40] built with the side profile (1), [41, 42] the loaded interval's ends along tangent 2
+	// (empty: [41] above [42]), [43] the deepest point's y along it (the last three 0 without a profile).
 	virtual bool soft_surfaces_available() const override;
 	virtual void body_set_shape_soft_surface(RID p_body, int p_shape_idx, const PackedFloat32Array &p_params) override;
 	virtual PackedInt32Array space_get_soft_contact_stats(RID p_space) const override;
