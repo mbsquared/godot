@@ -2203,15 +2203,40 @@ void MaterialStorage::shader_free(RID p_rid) {
 	ERR_FAIL_NULL(shader);
 
 	//make material unreference this
-	while (shader->owners.size()) {
-		material_set_shader((*shader->owners.begin())->self, RID());
+	// Detach from a copy of the owner set, stale owners dropped first: one stale owner made the old
+	// loop-until-empty spin forever, as in the RD renderer (CRUMB's exit hang, 2026-10-20).
+	_shader_drop_stale_owners(shader);
+	LocalVector<GLES3::Material *> owners;
+	owners.reserve(shader->owners.size());
+	for (GLES3::Material *E : shader->owners) {
+		owners.push_back(E);
 	}
+	for (GLES3::Material *E : owners) {
+		material_set_shader(E->self, RID());
+	}
+	shader->owners.clear();
 
 	//clear data if exists
 	if (shader->data) {
 		memdelete(shader->data);
 	}
 	shader_owner.free(p_rid);
+}
+
+// Drops every owner of a shader whose material is gone, or now belongs to another shader, with one error each
+// (as the RD renderer's MaterialStorage does).
+void MaterialStorage::_shader_drop_stale_owners(GLES3::Shader *p_shader) {
+	LocalVector<GLES3::Material *> stale;
+	for (GLES3::Material *E : p_shader->owners) {
+		GLES3::Material *material = material_owner.get_or_null(E->self);
+		if (material != E || material->shader != p_shader) {
+			stale.push_back(E);
+		}
+	}
+	for (GLES3::Material *E : stale) {
+		p_shader->owners.erase(E);
+		ERR_PRINT(vformat("Shader '%s' had a stale owner: a material was freed without leaving the shader's owner set.", p_shader->path_hint));
+	}
 }
 
 void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {

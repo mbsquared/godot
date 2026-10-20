@@ -1997,9 +1997,20 @@ void MaterialStorage::shader_free(RID p_rid) {
 	ERR_FAIL_NULL(shader);
 
 	//make material unreference this
-	while (shader->owners.size()) {
-		material_set_shader((*shader->owners.begin())->self, RID());
+	// Detach from a copy of the owner set, stale owners dropped first. An owner whose material was freed
+	// without leaving the set makes material_set_shader fail before its erase, so looping until the set
+	// was empty spun forever, printing "material is null" until the process was killed (CRUMB's exit hang,
+	// 2026-10-20).
+	_shader_drop_stale_owners(shader);
+	LocalVector<Material *> owners;
+	owners.reserve(shader->owners.size());
+	for (Material *E : shader->owners) {
+		owners.push_back(E);
 	}
+	for (Material *E : owners) {
+		material_set_shader(E->self, RID());
+	}
+	shader->owners.clear();
 
 	//clear data if exists
 	if (shader->data) {
@@ -2019,6 +2030,7 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 	Shader *shader = shader_owner.get_or_null(p_shader);
 	ERR_FAIL_NULL(shader);
 
+	_shader_drop_stale_owners(shader);
 	shader->code = p_code;
 	String mode_string = ShaderLanguage::get_shader_type(p_code);
 
@@ -2137,9 +2149,27 @@ void MaterialStorage::shader_set_default_texture_parameter(RID p_shader, const S
 	if (shader->data) {
 		shader->data->set_default_texture_parameter(p_name, p_texture, p_index);
 	}
+	_shader_drop_stale_owners(shader);
 	for (Material *E : shader->owners) {
 		Material *material = E;
 		_material_queue_update(material, false, true);
+	}
+}
+
+// Drops every owner of a shader whose material is gone, or now belongs to another shader, with one error each.
+// Such an entry can only be left by a material made or freed without the owner set's discipline; every walk
+// of the set (freeing the shader, new code, default textures) would otherwise touch freed or foreign memory.
+void MaterialStorage::_shader_drop_stale_owners(Shader *p_shader) {
+	LocalVector<Material *> stale;
+	for (Material *E : p_shader->owners) {
+		Material *material = material_owner.get_or_null(E->self);
+		if (material != E || material->shader != p_shader) {
+			stale.push_back(E);
+		}
+	}
+	for (Material *E : stale) {
+		p_shader->owners.erase(E);
+		ERR_PRINT(vformat("Shader '%s' had a stale owner: a material was freed without leaving the shader's owner set.", p_shader->path_hint));
 	}
 }
 

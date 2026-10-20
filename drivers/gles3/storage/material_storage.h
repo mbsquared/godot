@@ -622,6 +622,7 @@ public:
 
 	void _material_queue_update(Material *material, bool p_uniform, bool p_texture);
 	void _update_queued_materials();
+	void _shader_drop_stale_owners(GLES3::Shader *p_shader);
 
 	virtual RID material_allocate() override;
 	virtual void material_initialize(RID p_rid) override;

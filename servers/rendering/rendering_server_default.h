@@ -301,7 +301,16 @@ public:
 			RSG::material_storage->material_initialize(material);
 			RSG::material_storage->material_set_next_pass(material, p_next_pass);
 			RSG::material_storage->material_set_render_priority(material, p_render_priority);
-			RSG::material_storage->material_set_shader(material, p_shader);
+			// material_set_shader inserts the material into the shader's owner set, which nothing locks.
+			// Off the server thread it is queued, as every other material_set_shader is (FUNC2 below), so
+			// a material made on a loader thread cannot race the server thread's inserts and erases. (CRUMB,
+			// 2026-10-20: its preview loads made materials on pool threads, which left a stale owner behind
+			// and hung shader_free at exit.)
+			if (using_server_thread) {
+				RSG::material_storage->material_set_shader(material, p_shader);
+			} else {
+				command_queue.push(RSG::material_storage, &RendererMaterialStorage::material_set_shader, material, p_shader);
+			}
 		} else {
 			command_queue.push(RSG::material_storage, &RendererMaterialStorage::material_initialize, material);
 			command_queue.push(RSG::material_storage, &RendererMaterialStorage::material_set_next_pass, material, p_next_pass);
@@ -342,7 +351,14 @@ public:
 			for (int i = 0; i < p_surfaces.size(); i++) {
 				RSG::mesh_storage->mesh_add_surface(mesh, p_surfaces[i]);
 			}
-			RSG::scene->mesh_generate_pipelines(mesh, using_server_thread);
+			if (using_server_thread) {
+				RSG::scene->mesh_generate_pipelines(mesh, true);
+			} else {
+				// Queued behind the shader links that material_create_from_shader queues for materials made on
+				// this thread, so the pipelines are compiled for their shaders, in the background, before the
+				// first draw.
+				command_queue.push(RSG::scene, &RenderingMethod::mesh_generate_pipelines, mesh, true);
+			}
 		} else {
 			command_queue.push(RSG::mesh_storage, &RendererMeshStorage::mesh_initialize, mesh);
 			command_queue.push(RSG::mesh_storage, &RendererMeshStorage::mesh_set_blend_shape_count, mesh, p_blend_shape_count);
